@@ -838,6 +838,14 @@ select {
   background: #1a1c21;
 }
 
+.inspector-section-title {
+  color: #a8afbd;
+  font-size: 12px;
+  font-weight: 600;
+  margin-right: 8px;
+  padding: 0 6px;
+}
+
 .inspector-tabs button {
   border: 1px solid transparent;
   background: transparent;
@@ -851,13 +859,19 @@ select {
   color: #f1f3f8;
 }
 
-.inspector-inline-meta {
-  margin-left: 12px;
+.inspector-live-toggle {
+  margin-left: 8px;
   display: inline-flex;
   align-items: center;
-  gap: 14px;
-  color: #a8afbd;
+  gap: 6px;
+  color: #c4c9d4;
   font-size: 12px;
+  user-select: none;
+}
+
+.inspector-live-toggle input {
+  margin: 0;
+  accent-color: #58a6ff;
 }
 
 .inspector-content {
@@ -936,7 +950,8 @@ select {
 }
 
 .inspector-master-row.selected {
-  background: #262a33;
+  background: #262d3a;
+  box-shadow: inset 2px 0 0 #58a6ff;
 }
 
 .master-title {

@@ -1,5 +1,13 @@
 import path from "node:path";
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Notification,
+  nativeImage,
+  type NativeImage
+} from "electron";
 import log from "electron-log";
 import type { AppSettings } from "../shared/types";
 import { IPC_CHANNELS } from "./ipcChannels";
@@ -11,6 +19,7 @@ let sessionManager: SessionManager | null = null;
 let settingsStore: SettingsStore | null = null;
 let allowMainWindowClose = false;
 let closePromptInFlight = false;
+let clearAttentionTimer: NodeJS.Timeout | null = null;
 
 function resolveIconPath(): string {
   return path.join(app.getAppPath(), "build", "icon.png");
@@ -23,6 +32,61 @@ function emitWindowState(): void {
   mainWindow.webContents.send(IPC_CHANNELS.windowStateChanged, {
     isMaximized: mainWindow.isMaximized()
   });
+}
+
+function escapeSvgText(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function buildWindowsOverlayBadge(label: string): NativeImage | null {
+  if (process.platform !== "win32") {
+    return null;
+  }
+  const text = escapeSvgText(label.trim() || "1");
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+      <defs>
+        <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#000000" flood-opacity="0.35"/>
+        </filter>
+      </defs>
+      <circle cx="32" cy="32" r="28" fill="#f08c00" filter="url(#shadow)"/>
+      <text x="32" y="41" text-anchor="middle" fill="#ffffff" font-size="32" font-family="Segoe UI, Arial, sans-serif" font-weight="700">${text}</text>
+    </svg>
+  `.trim();
+  const encoded = Buffer.from(svg, "utf8").toString("base64");
+  return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${encoded}`);
+}
+
+function clearWindowAttention(): void {
+  if (clearAttentionTimer) {
+    clearTimeout(clearAttentionTimer);
+    clearAttentionTimer = null;
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  if (process.platform === "win32") {
+    mainWindow.flashFrame(false);
+    mainWindow.setOverlayIcon(null, "");
+  }
+}
+
+function triggerWindowAttention(badgeText: string): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  if (process.platform === "win32") {
+    const overlay = buildWindowsOverlayBadge(badgeText);
+    mainWindow.setOverlayIcon(overlay, "Long recording reminder");
+    mainWindow.flashFrame(true);
+    if (clearAttentionTimer) {
+      clearTimeout(clearAttentionTimer);
+    }
+    clearAttentionTimer = setTimeout(() => {
+      clearWindowAttention();
+    }, 30000);
+  }
 }
 
 function requireSessionManager(): SessionManager {
@@ -58,6 +122,7 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(IPC_CHANNELS.windowToggleMaximize);
   ipcMain.removeHandler(IPC_CHANNELS.windowClose);
   ipcMain.removeHandler(IPC_CHANNELS.windowIsMaximized);
+  ipcMain.removeHandler(IPC_CHANNELS.windowNotifyLongCapture);
 
   ipcMain.handle(IPC_CHANNELS.launchBrowser, async () => requireSessionManager().launchBrowser());
   ipcMain.handle(IPC_CHANNELS.startCapture, async () => requireSessionManager().startCapture());
@@ -124,6 +189,34 @@ function registerIpcHandlers(): void {
     }
     return { isMaximized: mainWindow.isMaximized() };
   });
+  ipcMain.handle(
+    IPC_CHANNELS.windowNotifyLongCapture,
+    async (
+      _event,
+      payload?: {
+        title?: string;
+        body?: string;
+        badgeText?: string;
+      }
+    ) => {
+      const title = payload?.title?.trim() || "Long recording reminder";
+      const body =
+        payload?.body?.trim() ||
+        "This session has been recording for a long time. Make sure you don't leave capture running unintentionally.";
+      const badgeText = payload?.badgeText?.trim() || "1";
+
+      triggerWindowAttention(badgeText);
+
+      if (Notification.isSupported()) {
+        try {
+          const notification = new Notification({ title, body });
+          notification.show();
+        } catch (error) {
+          log.warn("Failed to display long recording notification.", error);
+        }
+      }
+    }
+  );
 }
 
 async function createMainWindow(): Promise<void> {
@@ -218,8 +311,10 @@ async function createMainWindow(): Promise<void> {
   });
 
   mainWindow.on("closed", () => {
+    clearWindowAttention();
     mainWindow = null;
   });
+  mainWindow.on("focus", clearWindowAttention);
   mainWindow.on("maximize", emitWindowState);
   mainWindow.on("unmaximize", emitWindowState);
   mainWindow.on("restore", emitWindowState);
@@ -239,6 +334,7 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", () => {
+  clearWindowAttention();
   if (sessionManager) {
     void sessionManager.dispose();
   }

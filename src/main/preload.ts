@@ -25,6 +25,7 @@ const api: TracerApi = {
     toggleMaximize: () => ipcRenderer.invoke(IPC_CHANNELS.windowToggleMaximize),
     close: () => ipcRenderer.invoke(IPC_CHANNELS.windowClose),
     isMaximized: () => ipcRenderer.invoke(IPC_CHANNELS.windowIsMaximized),
+    notifyLongCapture: (payload) => ipcRenderer.invoke(IPC_CHANNELS.windowNotifyLongCapture, payload),
     onStateChanged: (listener) => {
       const wrapped = (_event: Electron.IpcRendererEvent, state: { isMaximized: boolean }) =>
         listener(state);

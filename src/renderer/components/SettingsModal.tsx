@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import {
   DEFAULT_APP_SETTINGS,
+  MAX_LONG_CAPTURE_WARNING_MINUTES,
   MAX_SCREENSHOT_INTERVAL_MS,
+  MIN_LONG_CAPTURE_WARNING_MINUTES,
   MIN_SCREENSHOT_INTERVAL_MS,
   normalizeAppSettings,
   normalizeStartUrlInput
@@ -189,6 +191,27 @@ export function SettingsModal({
                 }))
               }
             />
+          </label>
+
+          <label className="settings-field">
+            <span>Long Capture Warning (minutes)</span>
+            <input
+              type="number"
+              min={MIN_LONG_CAPTURE_WARNING_MINUTES}
+              max={MAX_LONG_CAPTURE_WARNING_MINUTES}
+              step={1}
+              value={draft.longCaptureWarningMinutes}
+              onChange={(event) =>
+                setDraft((previous) => ({
+                  ...previous,
+                  longCaptureWarningMinutes: Number(event.target.value)
+                }))
+              }
+            />
+            <p className="settings-path-note">
+              Shows a reminder notification and taskbar attention when capture runs too long.
+              Set to 0 to disable.
+            </p>
           </label>
 
           <div className="settings-field">

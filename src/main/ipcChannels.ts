@@ -17,5 +17,6 @@ export const IPC_CHANNELS = {
   windowToggleMaximize: "window.toggleMaximize",
   windowClose: "window.close",
   windowIsMaximized: "window.isMaximized",
+  windowNotifyLongCapture: "window.notifyLongCapture",
   windowStateChanged: "window.stateChanged"
 } as const;

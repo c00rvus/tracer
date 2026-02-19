@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import type { CaptureEvent, SessionStatus } from "../../shared/types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CaptureEvent } from "../../shared/types";
 import { ResizableSplit } from "./ResizableSplit";
 import { eventTitle, formatRelMs } from "../view-model/eventSummaries";
 
@@ -7,13 +7,13 @@ type InspectorTab = "call" | "log" | "errors" | "console" | "network";
 type NetworkDetailTab = "headers" | "payload" | "preview" | "response" | "initiator" | "timing";
 
 interface InspectorTabsProps {
-  status: SessionStatus;
   selectedEvent: CaptureEvent | null;
   logWindow: CaptureEvent[];
   errorWindow: CaptureEvent[];
   consoleWindow: CaptureEvent[];
   networkWindow: CaptureEvent[];
-  requestChain: CaptureEvent[];
+  liveSyncEnabled: boolean;
+  onToggleLiveSync: (enabled: boolean) => void;
 }
 
 interface NetworkEntry {
@@ -45,6 +45,29 @@ const NETWORK_DETAIL_TABS: Array<{ id: NetworkDetailTab; label: string }> = [
   { id: "initiator", label: "Initiator" },
   { id: "timing", label: "Timing" }
 ];
+
+function tabForSelectedEvent(event: CaptureEvent | null): InspectorTab {
+  if (!event) {
+    return "call";
+  }
+  if (
+    event.kind === "network_request" ||
+    event.kind === "network_response" ||
+    event.kind === "network_fail"
+  ) {
+    return "network";
+  }
+  if (event.kind === "console") {
+    if (event.level === "error") {
+      return "errors";
+    }
+    return "console";
+  }
+  if (event.kind === "lifecycle") {
+    return "log";
+  }
+  return "call";
+}
 
 function formatJson(value: unknown): string {
   try {
@@ -124,6 +147,7 @@ function toKeyValueRows(headers?: Record<string, string>, emptyLabel = "No heade
 
 function buildNetworkEntries(events: CaptureEvent[]): NetworkEntry[] {
   const map = new Map<string, NetworkEntry>();
+  const firstSeenIndexByRequestId = new Map<string, number>();
 
   const ensureEntry = (requestId: string): NetworkEntry => {
     const existing = map.get(requestId);
@@ -141,13 +165,16 @@ function buildNetworkEntries(events: CaptureEvent[]): NetworkEntry[] {
     return entry;
   };
 
-  for (const event of events) {
+  for (const [index, event] of events.entries()) {
     if (
       event.kind !== "network_request" &&
       event.kind !== "network_response" &&
       event.kind !== "network_fail"
     ) {
       continue;
+    }
+    if (!firstSeenIndexByRequestId.has(event.requestId)) {
+      firstSeenIndexByRequestId.set(event.requestId, index);
     }
     const entry = ensureEntry(event.requestId);
     entry.events.push(event);
@@ -181,7 +208,15 @@ function buildNetworkEntries(events: CaptureEvent[]): NetworkEntry[] {
 
   const entries = Array.from(map.values());
   for (const entry of entries) {
-    entry.events.sort((a, b) => a.tsMs - b.tsMs);
+    entry.events.sort((a, b) => {
+      if (a.tsMs !== b.tsMs) {
+        return a.tsMs - b.tsMs;
+      }
+      if (a.tRelMs !== b.tRelMs) {
+        return a.tRelMs - b.tRelMs;
+      }
+      return a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: "base" });
+    });
     if (!entry.startedTsMs) {
       entry.startedTsMs = entry.events[0]?.tsMs;
     }
@@ -193,7 +228,39 @@ function buildNetworkEntries(events: CaptureEvent[]): NetworkEntry[] {
     }
   }
 
-  return entries.sort((a, b) => (b.startedTsMs ?? 0) - (a.startedTsMs ?? 0));
+  const toRequestOrder = (requestId: string): number | null => {
+    const numeric = Number(requestId);
+    return Number.isFinite(numeric) ? numeric : null;
+  };
+
+  return entries.sort((a, b) => {
+    const aFirstIndex = firstSeenIndexByRequestId.get(a.requestId);
+    const bFirstIndex = firstSeenIndexByRequestId.get(b.requestId);
+    if (typeof aFirstIndex === "number" && typeof bFirstIndex === "number" && aFirstIndex !== bFirstIndex) {
+      return aFirstIndex - bFirstIndex;
+    }
+
+    const aStart = a.startedTsMs ?? 0;
+    const bStart = b.startedTsMs ?? 0;
+    if (aStart !== bStart) {
+      // Keep the same chronological direction as Actions/timeline.
+      return aStart - bStart;
+    }
+
+    const aFirstTs = a.events[0]?.tsMs ?? aStart;
+    const bFirstTs = b.events[0]?.tsMs ?? bStart;
+    if (aFirstTs !== bFirstTs) {
+      return aFirstTs - bFirstTs;
+    }
+
+    const aReqOrder = toRequestOrder(a.requestId);
+    const bReqOrder = toRequestOrder(b.requestId);
+    if (aReqOrder !== null && bReqOrder !== null && aReqOrder !== bReqOrder) {
+      return aReqOrder - bReqOrder;
+    }
+
+    return a.requestId.localeCompare(b.requestId, undefined, { numeric: true, sensitivity: "base" });
+  });
 }
 
 function EventMasterList({
@@ -322,6 +389,7 @@ function NetworkInspector({
   onSelectRequest: (requestId: string) => void;
 }): JSX.Element {
   const [activeDetailTab, setActiveDetailTab] = useState<NetworkDetailTab>("headers");
+  const selectedRowRef = useRef<HTMLButtonElement | null>(null);
   const selectedEntry = entries.find((entry) => entry.requestId === selectedRequestId) ?? entries[0] ?? null;
   const requestEvent = selectedEntry?.events.find((event) => event.kind === "network_request");
   const responseEvent = selectedEntry?.events.find((event) => event.kind === "network_response");
@@ -347,6 +415,16 @@ function NetworkInspector({
     }
   }, [entries, onSelectRequest, selectedRequestId]);
 
+  useEffect(() => {
+    if (!selectedRowRef.current) {
+      return;
+    }
+    selectedRowRef.current.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest"
+    });
+  }, [selectedEntry?.requestId]);
+
   if (entries.length === 0) {
     return <div className="empty-state">No network requests available.</div>;
   }
@@ -359,8 +437,10 @@ function NetworkInspector({
           {entries.map((entry) => (
             <button
               key={entry.requestId}
+              ref={entry.requestId === selectedEntry?.requestId ? selectedRowRef : null}
               className={`inspector-master-row ${entry.requestId === selectedEntry?.requestId ? "selected" : ""}`}
               onClick={() => onSelectRequest(entry.requestId)}
+              aria-selected={entry.requestId === selectedEntry?.requestId}
             >
               <span className="master-title">
                 {entry.method} {entry.status ? `${entry.status}` : entry.failed ? "FAILED" : ""}
@@ -534,28 +614,22 @@ function NetworkInspector({
 }
 
 export function InspectorTabs({
-  status,
   selectedEvent,
   logWindow,
   errorWindow,
   consoleWindow,
   networkWindow,
-  requestChain
+  liveSyncEnabled,
+  onToggleLiveSync
 }: InspectorTabsProps): JSX.Element {
   const [activeTab, setActiveTab] = useState<InspectorTab>("call");
   const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
   const [selectedErrorId, setSelectedErrorId] = useState<string | null>(null);
   const [selectedConsoleId, setSelectedConsoleId] = useState<string | null>(null);
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
+  const syncedActionEventIdRef = useRef<string | null>(null);
 
-  const networkSource = useMemo(() => {
-    if (requestChain.length > 0) {
-      return requestChain;
-    }
-    return networkWindow;
-  }, [networkWindow, requestChain]);
-
-  const networkEntries = useMemo(() => buildNetworkEntries(networkSource), [networkSource]);
+  const networkEntries = useMemo(() => buildNetworkEntries(networkWindow), [networkWindow]);
   const selectedLogEvent = logWindow.find((event) => event.id === selectedLogId) ?? logWindow[0] ?? null;
   const selectedErrorEvent = errorWindow.find((event) => event.id === selectedErrorId) ?? errorWindow[0] ?? null;
   const selectedConsoleEvent =
@@ -574,6 +648,46 @@ export function InspectorTabs({
   }, [errorWindow, selectedErrorId]);
 
   useEffect(() => {
+    syncedActionEventIdRef.current = null;
+  }, [liveSyncEnabled]);
+
+  useEffect(() => {
+    if (!selectedEvent) {
+      syncedActionEventIdRef.current = null;
+      return;
+    }
+
+    if (syncedActionEventIdRef.current === selectedEvent.id) {
+      return;
+    }
+    syncedActionEventIdRef.current = selectedEvent.id;
+
+    setSelectedLogId(selectedEvent.id);
+    if (!liveSyncEnabled) {
+      setActiveTab("call");
+      return;
+    }
+
+    setActiveTab(tabForSelectedEvent(selectedEvent));
+
+    if (selectedEvent.kind === "console") {
+      setSelectedConsoleId(selectedEvent.id);
+      if (selectedEvent.level === "error") {
+        setSelectedErrorId(selectedEvent.id);
+      }
+      return;
+    }
+
+    if (
+      selectedEvent.kind === "network_request" ||
+      selectedEvent.kind === "network_response" ||
+      selectedEvent.kind === "network_fail"
+    ) {
+      setSelectedRequestId(selectedEvent.requestId);
+    }
+  }, [liveSyncEnabled, selectedEvent]);
+
+  useEffect(() => {
     if (consoleWindow.length > 0 && !selectedConsoleId) {
       setSelectedConsoleId(consoleWindow[0].id);
     }
@@ -582,6 +696,7 @@ export function InspectorTabs({
   return (
     <section className="inspector-panel">
       <nav className="inspector-tabs">
+        <span className="inspector-section-title">Inspector</span>
         <button className={activeTab === "call" ? "active" : ""} onClick={() => setActiveTab("call")}>
           Call
         </button>
@@ -597,12 +712,14 @@ export function InspectorTabs({
         <button className={activeTab === "network" ? "active" : ""} onClick={() => setActiveTab("network")}>
           Network
         </button>
-        <div className="inspector-inline-meta">
-          <span>state: {status.state}</span>
-          <span>events: {status.counts.events}</span>
-          <span>screens: {status.counts.screenshots}</span>
-          <span>requests: {status.counts.networkRequests}</span>
-        </div>
+        <label className="inspector-live-toggle">
+          <input
+            type="checkbox"
+            checked={liveSyncEnabled}
+            onChange={(event) => onToggleLiveSync(event.target.checked)}
+          />
+          <span>Live</span>
+        </label>
       </nav>
 
       <div className="inspector-content">

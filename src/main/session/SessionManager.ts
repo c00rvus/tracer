@@ -89,6 +89,8 @@ export class SessionManager {
   private events: CaptureEvent[] = [];
   private eventById = new Map<string, CaptureEvent>();
   private screenshotPathById = new Map<string, string>();
+  private lastScreenshotEvent: ScreenshotEvent | null = null;
+  private screenshotRun: Promise<void> | null = null;
 
   private responseByRequestId = new Map<string, PendingResponse>();
   private requestUrlById = new Map<string, string>();
@@ -117,6 +119,13 @@ export class SessionManager {
   };
 
   private readonly pageLoadHandler = (): void => {
+    if (!this.captureSettings.screenshotOnPageLoad) {
+      return;
+    }
+    void this.captureScreenshot("load");
+  };
+
+  private readonly pageDomContentLoadedHandler = (): void => {
     if (!this.captureSettings.screenshotOnPageLoad) {
       return;
     }
@@ -364,10 +373,12 @@ export class SessionManager {
       this.events = events.sort((a, b) => a.tsMs - b.tsMs);
       this.eventById.clear();
       this.screenshotPathById.clear();
+      this.lastScreenshotEvent = null;
       for (const event of this.events) {
         this.eventById.set(event.id, event);
         if (event.kind === "screenshot") {
           this.screenshotPathById.set(event.screenshotId, path.join(extractRoot, event.path));
+          this.lastScreenshotEvent = event;
         }
       }
 
@@ -422,6 +433,7 @@ export class SessionManager {
     this.events = [];
     this.eventById.clear();
     this.screenshotPathById.clear();
+    this.lastScreenshotEvent = null;
     this.requestUrlById.clear();
     this.responseByRequestId.clear();
     this.containsBodies = false;
@@ -457,6 +469,7 @@ export class SessionManager {
 
     this.clearCaptureTimer();
     this.detachCaptureListeners();
+    await this.waitForOngoingScreenshot();
 
     this.emitLifecycleEvent("capture_stopped", reason);
     this.status.captureEndedAt = Date.now();
@@ -481,6 +494,7 @@ export class SessionManager {
     if (!this.page || !this.cdp || this.listenersAttached) {
       return;
     }
+    this.page.on("domcontentloaded", this.pageDomContentLoadedHandler);
     this.page.on("load", this.pageLoadHandler);
     this.page.on("console", this.consoleHandler);
 
@@ -498,6 +512,7 @@ export class SessionManager {
     }
 
     if (this.page) {
+      this.page.off("domcontentloaded", this.pageDomContentLoadedHandler);
       this.page.off("load", this.pageLoadHandler);
       this.page.off("console", this.consoleHandler);
     }
@@ -552,6 +567,7 @@ export class SessionManager {
     if (event.kind === "screenshot") {
       this.status.counts.screenshots += 1;
       this.screenshotPathById.set(event.screenshotId, path.join(this.sessionRoot ?? "", event.path));
+      this.lastScreenshotEvent = event;
     }
     if (event.kind === "network_request") {
       this.status.counts.networkRequests += 1;
@@ -627,6 +643,10 @@ export class SessionManager {
       resourceType: params.type
     };
     this.appendEvent(event);
+
+    if (this.captureSettings.screenshotOnPageLoad && params.type === "Document") {
+      void this.captureScreenshot("load");
+    }
   }
 
   private handleResponseReceived(params: {
@@ -743,6 +763,29 @@ export class SessionManager {
   private async captureScreenshot(
     reason: ScreenshotEvent["reason"]
   ): Promise<void> {
+    if (reason === "timer" && this.screenshotRun) {
+      this.appendFallbackScreenshotFromLast(reason);
+      return;
+    }
+
+    if (this.screenshotRun) {
+      await this.waitForOngoingScreenshot();
+    }
+
+    const run = this.captureScreenshotInternal(reason);
+    this.screenshotRun = run;
+    try {
+      await run;
+    } finally {
+      if (this.screenshotRun === run) {
+        this.screenshotRun = null;
+      }
+    }
+  }
+
+  private async captureScreenshotInternal(
+    reason: ScreenshotEvent["reason"]
+  ): Promise<void> {
     if (!this.isCapturing() || !this.page || this.page.isClosed()) {
       return;
     }
@@ -759,10 +802,18 @@ export class SessionManager {
     const absolutePath = path.join(this.sessionRoot, relativePath);
     await ensureDir(path.dirname(absolutePath));
 
-    await this.page.screenshot({
-      path: absolutePath,
-      fullPage: this.captureSettings.fullPageScreenshots
-    });
+    try {
+      await this.captureScreenshotWithRetry(absolutePath, reason);
+    } catch (error) {
+      log.warn(`Failed to capture screenshot (${reason}).`, error);
+      try {
+        await unlink(absolutePath);
+      } catch {
+        // ignore unlink failures for partial captures
+      }
+      this.appendFallbackScreenshotFromLast(reason);
+      return;
+    }
 
     const viewport = this.page.viewportSize();
     const width = viewport?.width ?? 0;
@@ -785,6 +836,89 @@ export class SessionManager {
       reason
     };
     this.appendEvent(event);
+  }
+
+  private async captureScreenshotWithRetry(
+    absolutePath: string,
+    reason: ScreenshotEvent["reason"]
+  ): Promise<void> {
+    const attempts = this.captureSettings.fullPageScreenshots
+      ? [
+          { waitMs: 0, fullPage: true, timeoutMs: 1200 },
+          { waitMs: 90, fullPage: false, timeoutMs: 1400 },
+          { waitMs: 180, fullPage: false, timeoutMs: 1800 }
+        ]
+      : [
+          { waitMs: 0, fullPage: false, timeoutMs: 1200 },
+          { waitMs: 90, fullPage: false, timeoutMs: 1400 },
+          { waitMs: 180, fullPage: false, timeoutMs: 1800 }
+        ];
+
+    let lastError: unknown;
+    for (const attempt of attempts) {
+      if (!this.isCapturing() || !this.page || this.page.isClosed()) {
+        return;
+      }
+      if (attempt.waitMs > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, attempt.waitMs));
+      }
+
+      try {
+        await this.page.screenshot({
+          path: absolutePath,
+          fullPage: attempt.fullPage,
+          timeout: attempt.timeoutMs
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw (
+      lastError ??
+      new Error(`Screenshot capture failed after retries for reason "${reason}".`)
+    );
+  }
+
+  private appendFallbackScreenshotFromLast(reason: ScreenshotEvent["reason"]): void {
+    if (!this.isCapturing() || !this.lastScreenshotEvent || !this.status.sessionId) {
+      return;
+    }
+    const timelineCaptureStartAtMs = this.getTimelineCaptureStartAtMs();
+    if (timelineCaptureStartAtMs === null) {
+      return;
+    }
+
+    const base = createBaseEvent({
+      sessionId: this.status.sessionId,
+      captureStartAtMs: timelineCaptureStartAtMs,
+      kind: "screenshot",
+      pageUrl: this.page?.url() ?? this.lastScreenshotEvent.pageUrl
+    });
+
+    const fallbackEvent: ScreenshotEvent = {
+      ...base,
+      kind: "screenshot",
+      screenshotId: randomUUID(),
+      path: this.lastScreenshotEvent.path,
+      width: this.lastScreenshotEvent.width,
+      height: this.lastScreenshotEvent.height,
+      reason
+    };
+    this.appendEvent(fallbackEvent);
+  }
+
+  private async waitForOngoingScreenshot(): Promise<void> {
+    const run = this.screenshotRun;
+    if (!run) {
+      return;
+    }
+    try {
+      await run;
+    } catch {
+      // errors are already handled inside capture routines
+    }
   }
 
   private async onBrowserClosed(reason: string): Promise<void> {
@@ -825,6 +959,7 @@ export class SessionManager {
   private async resetAllRuntime(): Promise<void> {
     this.clearCaptureTimer();
     this.detachCaptureListeners();
+    await this.waitForOngoingScreenshot();
     await this.flushEventsStream();
 
     if (this.page) {
@@ -846,10 +981,12 @@ export class SessionManager {
     this.events = [];
     this.eventById.clear();
     this.screenshotPathById.clear();
+    this.lastScreenshotEvent = null;
     this.requestUrlById.clear();
     this.responseByRequestId.clear();
     this.sessionRoot = null;
     this.containsBodies = false;
+    this.screenshotRun = null;
     this.pausedStartedAtMs = null;
     this.pausedAccumulatedMs = 0;
     this.status = JSON.parse(JSON.stringify(STATUS_TEMPLATE)) as SessionStatus;

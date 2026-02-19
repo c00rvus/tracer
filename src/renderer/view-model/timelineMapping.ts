@@ -2,7 +2,7 @@ import type { CaptureEvent } from "../../shared/types";
 import { eventBadge, eventSubtitle, eventTitle, formatRelSeconds } from "./eventSummaries";
 import type { EventRowViewModel } from "./types";
 
-export type ActionFilterKind = CaptureEvent["kind"] | "errors";
+export type ActionFilterKind = Exclude<CaptureEvent["kind"], "screenshot"> | "errors";
 
 export const ACTION_FILTER_OPTIONS: ActionFilterKind[] = [
   "errors",
@@ -10,12 +10,21 @@ export const ACTION_FILTER_OPTIONS: ActionFilterKind[] = [
   "network_request",
   "network_response",
   "network_fail",
-  "screenshot",
   "lifecycle"
 ];
 
+export function compareCaptureEvents(a: CaptureEvent, b: CaptureEvent): number {
+  if (a.tsMs !== b.tsMs) {
+    return a.tsMs - b.tsMs;
+  }
+  if (a.tRelMs !== b.tRelMs) {
+    return a.tRelMs - b.tRelMs;
+  }
+  return a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: "base" });
+}
+
 export function sortTimeline(events: CaptureEvent[]): CaptureEvent[] {
-  return events.slice().sort((a, b) => a.tsMs - b.tsMs);
+  return events.slice().sort(compareCaptureEvents);
 }
 
 function getRequestId(event: CaptureEvent): string | null {
@@ -57,10 +66,14 @@ export function filterEventRows(
   const query = search.trim().toLowerCase();
   const allowedKinds = new Set<ActionFilterKind>(selectedKinds);
   return rows.filter((row) => {
+    if (row.kind === "screenshot") {
+      return false;
+    }
     const isErrorRow =
       row.event.kind === "network_fail" ||
       (row.event.kind === "console" && row.event.level === "error");
-    const kindSelected = allowedKinds.has(row.kind) || (allowedKinds.has("errors") && isErrorRow);
+    const kindSelected =
+      allowedKinds.has(row.kind as ActionFilterKind) || (allowedKinds.has("errors") && isErrorRow);
     if (!kindSelected) {
       return false;
     }
@@ -93,7 +106,9 @@ export function getWindowByTime(
   if (!Number.isFinite(centerTsMs)) {
     return [];
   }
-  return events.filter((event) => Math.abs(event.tsMs - centerTsMs) <= radiusMs);
+  return events
+    .filter((event) => Math.abs(event.tsMs - centerTsMs) <= radiusMs)
+    .sort(compareCaptureEvents);
 }
 
 export function getErrorsAroundEvent(events: CaptureEvent[], centerTsMs: number): CaptureEvent[] {
@@ -121,7 +136,7 @@ export function buildRequestMap(events: CaptureEvent[]): Map<string, CaptureEven
     map.set(requestId, items);
   }
   for (const items of map.values()) {
-    items.sort((a, b) => a.tsMs - b.tsMs);
+    items.sort(compareCaptureEvents);
   }
   return map;
 }

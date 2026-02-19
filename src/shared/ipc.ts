@@ -29,12 +29,19 @@ export interface WindowState {
 
 export type PlatformName = "win32" | "darwin" | "linux";
 
+export interface LongCaptureNotificationPayload {
+  title?: string;
+  body?: string;
+  badgeText?: string;
+}
+
 export interface WindowApi {
   platform: PlatformName;
   minimize(): Promise<void>;
   toggleMaximize(): Promise<WindowState>;
   close(): Promise<void>;
   isMaximized(): Promise<WindowState>;
+  notifyLongCapture(payload?: LongCaptureNotificationPayload): Promise<void>;
   onStateChanged(listener: (state: WindowState) => void): () => void;
 }
 

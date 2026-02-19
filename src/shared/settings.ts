@@ -2,12 +2,15 @@ import type { AppSettings } from "./types";
 
 export const MIN_SCREENSHOT_INTERVAL_MS = 250;
 export const MAX_SCREENSHOT_INTERVAL_MS = 10000;
+export const MIN_LONG_CAPTURE_WARNING_MINUTES = 0;
+export const MAX_LONG_CAPTURE_WARNING_MINUTES = 720;
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   startUrls: [],
   defaultStartUrl: "",
   defaultSessionSaveDir: "",
   autoSaveOnStopOrClose: true,
+  longCaptureWarningMinutes: 30,
   screenshotIntervalMs: 1000,
   fullPageScreenshots: true,
   screenshotOnPageLoad: true,
@@ -30,6 +33,17 @@ function toIntervalMs(value: unknown): number {
   return Math.max(
     MIN_SCREENSHOT_INTERVAL_MS,
     Math.min(MAX_SCREENSHOT_INTERVAL_MS, Math.floor(numeric))
+  );
+}
+
+function toLongCaptureWarningMinutes(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_APP_SETTINGS.longCaptureWarningMinutes;
+  }
+  return Math.max(
+    MIN_LONG_CAPTURE_WARNING_MINUTES,
+    Math.min(MAX_LONG_CAPTURE_WARNING_MINUTES, Math.floor(numeric))
   );
 }
 
@@ -130,6 +144,7 @@ export function normalizeAppSettings(input: Partial<AppSettings> | null | undefi
       input?.autoSaveOnStopOrClose,
       DEFAULT_APP_SETTINGS.autoSaveOnStopOrClose
     ),
+    longCaptureWarningMinutes: toLongCaptureWarningMinutes(input?.longCaptureWarningMinutes),
     screenshotIntervalMs: toIntervalMs(input?.screenshotIntervalMs),
     fullPageScreenshots: toBoolean(
       input?.fullPageScreenshots,

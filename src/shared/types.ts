@@ -132,6 +132,7 @@ export interface AppSettings {
   defaultStartUrl: string;
   defaultSessionSaveDir: string;
   autoSaveOnStopOrClose: boolean;
+  longCaptureWarningMinutes: number;
   screenshotIntervalMs: number;
   fullPageScreenshots: boolean;
   screenshotOnPageLoad: boolean;

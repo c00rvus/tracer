@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DEFAULT_APP_SETTINGS } from "../shared/settings";
 import type {
   AppSettings,
   CaptureEvent,
@@ -16,13 +17,11 @@ import { TraceToolbar } from "./components/TraceToolbar";
 import { WindowTitleBar } from "./components/WindowTitleBar";
 import { resolveScreenshotContext } from "./view-model/selectionResolvers";
 import {
-  buildRequestMap,
   ACTION_FILTER_OPTIONS,
   filterEventRows,
   getConsoleAroundEvent,
   getErrorsAroundEvent,
   getNetworkAroundEvent,
-  getRequestIdFromEvent,
   getWindowByIndex,
   sortTimeline,
   toEventRows,
@@ -61,10 +60,14 @@ function isUserCanceledMessage(message: string): boolean {
 }
 
 const BANNER_AUTO_HIDE_MS = 5000;
+const LONG_CAPTURE_WARNING_MESSAGE =
+  "This session has been recording for a long time. Make sure you don't leave capture running unintentionally.";
+const LONG_CAPTURE_WARNING_TITLE = "Long recording reminder";
 
 const STORAGE_KEYS = {
   actionsLiveSync: "tracer.actions-live-sync",
-  previewLiveSync: "tracer.preview-live-sync"
+  previewLiveSync: "tracer.preview-live-sync",
+  inspectorLiveSync: "tracer.inspector-live-sync"
 } as const;
 
 function readStoredBoolean(key: string, fallback: boolean): boolean {
@@ -124,6 +127,9 @@ export function App(): JSX.Element {
   const [liveScreenshotSyncEnabled, setLiveScreenshotSyncEnabled] = useState(() =>
     readStoredBoolean(STORAGE_KEYS.previewLiveSync, false)
   );
+  const [inspectorLiveSyncEnabled, setInspectorLiveSyncEnabled] = useState(() =>
+    readStoredBoolean(STORAGE_KEYS.inspectorLiveSync, true)
+  );
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const pauseResumeSupported =
     typeof window.tracer.session.pauseCapture === "function" &&
@@ -131,6 +137,10 @@ export function App(): JSX.Element {
 
   const loadingScreenshotIdsRef = useRef<Set<string>>(new Set());
   const dismissedStatusErrorRef = useRef<string | null>(null);
+  const longCaptureWarningStateRef = useRef<{ key: string | null; lastReminderSlot: number }>({
+    key: null,
+    lastReminderSlot: 0
+  });
 
   const refresh = useCallback(async () => {
     const currentStatus = await window.tracer.session.getStatus();
@@ -234,6 +244,10 @@ export function App(): JSX.Element {
   useEffect(() => {
     writeStoredBoolean(STORAGE_KEYS.previewLiveSync, liveScreenshotSyncEnabled);
   }, [liveScreenshotSyncEnabled]);
+
+  useEffect(() => {
+    writeStoredBoolean(STORAGE_KEYS.inspectorLiveSync, inspectorLiveSyncEnabled);
+  }, [inspectorLiveSyncEnabled]);
 
   useEffect(() => {
     setScreenshotById({});
@@ -428,21 +442,25 @@ export function App(): JSX.Element {
     [logsTimeline]
   );
 
-  const requestMap = useMemo(() => buildRequestMap(logsTimeline), [logsTimeline]);
-  const requestId = useMemo(() => getRequestIdFromEvent(selectedEvent), [selectedEvent]);
-  const requestChain = useMemo(() => {
-    if (!requestId) {
-      return [];
-    }
-    return requestMap.get(requestId) ?? [];
-  }, [requestId, requestMap]);
-
   const logTabEvents = logWindow.length > 0 ? logWindow : logsTimeline;
   const errorTabEvents = errorWindow.length > 0 ? errorWindow : errorEventsGlobal;
   const consoleTabEvents = consoleWindow.length > 0 ? consoleWindow : consoleEventsGlobal;
+  const networkEventsFromActionsFilter = useMemo(
+    () =>
+      filteredRows
+        .map((row) => row.event)
+        .filter((event) => {
+          return (
+            event.kind === "network_request" ||
+            event.kind === "network_response" ||
+            event.kind === "network_fail"
+          );
+        }),
+    [filteredRows]
+  );
   const networkTabEvents =
-    requestChain.length > 0
-      ? requestChain
+    networkEventsFromActionsFilter.length > 0
+      ? networkEventsFromActionsFilter
       : networkWindow.length > 0
         ? networkWindow
         : networkEventsGlobal;
@@ -695,6 +713,65 @@ export function App(): JSX.Element {
     [actionsLiveHoverTimelineEnabled]
   );
 
+  const longCaptureWarningKey =
+    status.sessionId && status.captureStartedAt
+      ? `${status.sessionId}:${status.captureStartedAt}`
+      : null;
+  const longCaptureWarningMinutes =
+    settings?.longCaptureWarningMinutes ?? DEFAULT_APP_SETTINGS.longCaptureWarningMinutes;
+  const maybeTriggerLongCaptureWarning = useCallback(() => {
+    if (status.state !== "capturing" || !status.captureStartedAt || !longCaptureWarningKey) {
+      longCaptureWarningStateRef.current = { key: null, lastReminderSlot: 0 };
+      return;
+    }
+    if (longCaptureWarningMinutes <= 0) {
+      longCaptureWarningStateRef.current = { key: null, lastReminderSlot: 0 };
+      return;
+    }
+
+    const elapsedMs = Date.now() - status.captureStartedAt;
+    const thresholdMs = longCaptureWarningMinutes * 60 * 1000;
+    const reminderSlot = Math.floor(elapsedMs / thresholdMs);
+    if (reminderSlot < 1) {
+      return;
+    }
+
+    const warningState = longCaptureWarningStateRef.current;
+    if (warningState.key !== longCaptureWarningKey) {
+      warningState.key = longCaptureWarningKey;
+      warningState.lastReminderSlot = 0;
+    }
+    if (reminderSlot <= warningState.lastReminderSlot) {
+      return;
+    }
+
+    warningState.lastReminderSlot = reminderSlot;
+    setSettingsNotice(LONG_CAPTURE_WARNING_MESSAGE);
+    void window.tracer.window
+      .notifyLongCapture({
+        title: LONG_CAPTURE_WARNING_TITLE,
+        body: LONG_CAPTURE_WARNING_MESSAGE,
+        badgeText: "1"
+      })
+      .catch((error) => {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to show capture warning.");
+      });
+  }, [longCaptureWarningKey, longCaptureWarningMinutes, status.captureStartedAt, status.state]);
+
+  useEffect(() => {
+    if (status.state !== "capturing") {
+      return;
+    }
+    maybeTriggerLongCaptureWarning();
+    const timer = window.setInterval(() => {
+      maybeTriggerLongCaptureWarning();
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [maybeTriggerLongCaptureWarning, status.state]);
+
   return (
     <div className="trace-app">
       {isWindows && (
@@ -836,13 +913,13 @@ export function App(): JSX.Element {
         }
         secondary={
           <InspectorTabs
-            status={status}
             selectedEvent={selectedEvent}
             logWindow={logTabEvents}
             errorWindow={errorTabEvents}
             consoleWindow={consoleTabEvents}
             networkWindow={networkTabEvents}
-            requestChain={requestChain}
+            liveSyncEnabled={inspectorLiveSyncEnabled}
+            onToggleLiveSync={setInspectorLiveSyncEnabled}
           />
         }
       />
