@@ -1,0 +1,21 @@
+export const IPC_CHANNELS = {
+  launchBrowser: "session.launchBrowser",
+  startCapture: "session.startCapture",
+  pauseCapture: "session.pauseCapture",
+  resumeCapture: "session.resumeCapture",
+  stopCapture: "session.stopCapture",
+  save: "session.save",
+  open: "session.open",
+  getTimeline: "session.getTimeline",
+  getEvent: "session.getEvent",
+  getScreenshot: "session.getScreenshot",
+  getStatus: "session.getStatus",
+  getSettings: "session.getSettings",
+  updateSettings: "session.updateSettings",
+  chooseDefaultSaveDirectory: "session.chooseDefaultSaveDirectory",
+  windowMinimize: "window.minimize",
+  windowToggleMaximize: "window.toggleMaximize",
+  windowClose: "window.close",
+  windowIsMaximized: "window.isMaximized",
+  windowStateChanged: "window.stateChanged"
+} as const;
