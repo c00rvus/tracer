@@ -818,6 +818,14 @@ export function App(): JSX.Element {
         }
         onStop={() => void runAction(() => window.tracer.session.stopCapture())}
         onSave={() => void runAction(() => window.tracer.session.save())}
+        onSaveRange={() =>
+          void runAction(() => {
+            if (!selectedTimeRange) {
+              throw new Error("No range selected.");
+            }
+            return window.tracer.session.save(undefined, { range: selectedTimeRange });
+          })
+        }
         onOpen={() => void runAction(() => window.tracer.session.open())}
         onSettings={() => void openSettings()}
         onToggleRangeSelection={handleToggleRangeSelection}

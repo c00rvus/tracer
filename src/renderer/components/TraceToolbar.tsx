@@ -13,6 +13,7 @@ interface TraceToolbarProps {
   onResume: () => void;
   onStop: () => void;
   onSave: () => void;
+  onSaveRange: () => void;
   onOpen: () => void;
   onSettings: () => void;
   onToggleRangeSelection: () => void;
@@ -32,6 +33,7 @@ export function TraceToolbar({
   onResume,
   onStop,
   onSave,
+  onSaveRange,
   onOpen,
   onSettings,
   onToggleRangeSelection,
@@ -95,6 +97,19 @@ export function TraceToolbar({
           onClick={onSave}
         >
           Save Session
+        </button>
+        <button
+          disabled={
+            busy ||
+            !hasTimeRangeSelection ||
+            (status.state !== "captured" &&
+              status.state !== "capturing" &&
+              status.state !== "paused" &&
+              status.state !== "reviewing")
+          }
+          onClick={onSaveRange}
+        >
+          Save Range
         </button>
         <button disabled={busy} onClick={onOpen}>
           Import

@@ -120,6 +120,15 @@ export interface SavedSessionResult {
   sessionId: string;
 }
 
+export interface SessionExportRange {
+  startMs: number;
+  endMs: number;
+}
+
+export interface SaveSessionOptions {
+  range?: SessionExportRange | null;
+}
+
 export interface ScreenshotPayload {
   screenshotId: string;
   path: string;

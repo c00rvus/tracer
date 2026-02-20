@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createWriteStream, WriteStream } from "node:fs";
-import { readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { app, dialog } from "electron";
 import log from "electron-log";
@@ -18,6 +18,7 @@ import type {
   NetworkFailEvent,
   NetworkRequestEvent,
   NetworkResponseEvent,
+  SaveSessionOptions,
   SavedSessionResult,
   ScreenshotEvent,
   ScreenshotPayload,
@@ -302,7 +303,7 @@ export class SessionManager {
     await this.stopCaptureInternal("app_close_confirmed");
   }
 
-  public async save(filePath?: string): Promise<SavedSessionResult> {
+  public async save(filePath?: string, options?: SaveSessionOptions): Promise<SavedSessionResult> {
     try {
       if (!this.status.sessionId || !this.sessionRoot) {
         throw new Error("No active session available for save.");
@@ -315,13 +316,18 @@ export class SessionManager {
       }
 
       await this.writeSessionMetadata();
-
-      const outputPath = filePath ?? (await this.pickSavePath());
+      const exportRange = this.normalizeExportRange(this.sortEvents(this.events), options?.range ?? null);
+      const outputPath = filePath ?? (await this.pickSavePath(exportRange));
       await ensureDir(path.dirname(outputPath));
-      await createSessionArchive({
-        sessionRoot: this.sessionRoot,
-        destinationZipPath: outputPath
-      });
+
+      if (exportRange) {
+        await this.saveRangeSnapshot(exportRange, outputPath);
+      } else {
+        await createSessionArchive({
+          sessionRoot: this.sessionRoot,
+          destinationZipPath: outputPath
+        });
+      }
       this.status.sessionFileName = path.basename(outputPath);
 
       return {
@@ -370,7 +376,7 @@ export class SessionManager {
       };
       this.containsBodies = manifest.flags.containsBodies;
 
-      this.events = events.sort((a, b) => a.tsMs - b.tsMs);
+      this.events = this.sortEvents(events);
       this.eventById.clear();
       this.screenshotPathById.clear();
       this.lastScreenshotEvent = null;
@@ -393,7 +399,7 @@ export class SessionManager {
     if (this.status.sessionId !== sessionId) {
       return [];
     }
-    return this.events.slice().sort((a, b) => a.tsMs - b.tsMs);
+    return this.sortEvents(this.events);
   }
 
   public async getEvent(eventId: string): Promise<CaptureEvent | null> {
@@ -1008,7 +1014,12 @@ export class SessionManager {
     if (!this.sessionRoot) {
       return;
     }
-    const versionPath = path.join(this.sessionRoot, "meta", "version.json");
+    await this.writeVersionFileForRoot(this.sessionRoot);
+  }
+
+  private async writeVersionFileForRoot(rootPath: string): Promise<void> {
+    const versionPath = path.join(rootPath, "meta", "version.json");
+    await ensureDir(path.dirname(versionPath));
     await writeFile(versionPath, JSON.stringify({ schemaVersion: SCHEMA_VERSION }, null, 2), "utf8");
   }
 
@@ -1077,6 +1088,134 @@ export class SessionManager {
     });
   }
 
+  private async saveRangeSnapshot(
+    range: { startMs: number; endMs: number },
+    destinationZipPath: string
+  ): Promise<void> {
+    if (!this.sessionRoot) {
+      throw new Error("Session root is not available for range export.");
+    }
+
+    const filteredEvents = this.sortEvents(this.events).filter((event) => {
+      return event.tRelMs >= range.startMs && event.tRelMs <= range.endMs;
+    });
+    if (filteredEvents.length === 0) {
+      throw new Error("No events found in the selected range.");
+    }
+
+    const exportRoot = path.join(app.getPath("temp"), "tracer-desktop-range-export", randomUUID());
+    await ensureDir(path.join(exportRoot, "meta"));
+
+    try {
+      await this.copyRangeAssets(filteredEvents, exportRoot);
+      const ndjson = filteredEvents.map((event) => serializeEventLine(event)).join("");
+      await writeFile(path.join(exportRoot, "events.ndjson"), ndjson, "utf8");
+      await this.writeRangeSessionMetadata(exportRoot, filteredEvents);
+      await this.writeVersionFileForRoot(exportRoot);
+      await createSessionArchive({
+        sessionRoot: exportRoot,
+        destinationZipPath
+      });
+    } finally {
+      await rm(exportRoot, { recursive: true, force: true });
+    }
+  }
+
+  private async copyRangeAssets(events: CaptureEvent[], exportRoot: string): Promise<void> {
+    if (!this.sessionRoot) {
+      return;
+    }
+
+    const assets = new Set<string>();
+    for (const event of events) {
+      if (event.kind === "screenshot") {
+        assets.add(event.path);
+      }
+      if (event.kind === "network_response" && event.bodyPath) {
+        assets.add(event.bodyPath);
+      }
+    }
+
+    for (const relativePath of assets) {
+      const normalized = this.toSafeRelativePath(relativePath);
+      if (!normalized) {
+        continue;
+      }
+      const sourcePath = path.join(this.sessionRoot, normalized);
+      const targetPath = path.join(exportRoot, normalized);
+      try {
+        await ensureDir(path.dirname(targetPath));
+        await copyFile(sourcePath, targetPath);
+      } catch (error) {
+        log.warn(`Failed to include range asset "${normalized}" in archive.`, error);
+      }
+    }
+  }
+
+  private async writeRangeSessionMetadata(exportRoot: string, events: CaptureEvent[]): Promise<void> {
+    if (!this.status.sessionId || !this.status.createdAt) {
+      throw new Error("Session metadata is unavailable for range export.");
+    }
+
+    const sorted = this.sortEvents(events);
+    const firstEvent = sorted[0];
+    const lastEvent = sorted[sorted.length - 1];
+    const containsBodies = sorted.some((event) => event.kind === "network_response" && Boolean(event.bodyPath));
+
+    const manifest: SessionManifest = buildManifest({
+      sessionId: this.status.sessionId,
+      createdAt: this.status.createdAt,
+      browserVersion: this.status.browserVersion,
+      appVersion: this.appVersion,
+      captureStartedAt: firstEvent?.tsMs ?? this.status.captureStartedAt,
+      captureEndedAt: lastEvent?.tsMs ?? this.status.captureEndedAt,
+      counts: {
+        events: sorted.length,
+        screenshots: sorted.filter((event) => event.kind === "screenshot").length,
+        networkRequests: sorted.filter((event) => event.kind === "network_request").length
+      },
+      containsBodies
+    });
+    await writeFile(path.join(exportRoot, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
+  }
+
+  private normalizeExportRange(
+    sortedEvents: CaptureEvent[],
+    range: SaveSessionOptions["range"] | undefined
+  ): { startMs: number; endMs: number } | null {
+    if (!range) {
+      return null;
+    }
+    const startRaw = Number(range.startMs);
+    const endRaw = Number(range.endMs);
+    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) {
+      throw new Error("Invalid range values.");
+    }
+
+    let startMs = Math.min(startRaw, endRaw);
+    let endMs = Math.max(startRaw, endRaw);
+
+    if (sortedEvents.length > 0) {
+      const minRel = sortedEvents[0].tRelMs;
+      const maxRel = sortedEvents[sortedEvents.length - 1].tRelMs;
+      startMs = Math.max(minRel, startMs);
+      endMs = Math.min(maxRel, endMs);
+    }
+
+    if (endMs < startMs) {
+      throw new Error("Selected range is outside the captured timeline.");
+    }
+    return { startMs, endMs };
+  }
+
+  private toSafeRelativePath(relativePath: string): string | null {
+    const normalized = path.normalize(relativePath).replace(/^[\\/]+/u, "");
+    if (normalized.startsWith("..")) {
+      return null;
+    }
+    return normalized;
+  }
+
   private async pruneOldAutoSaves(directoryPath: string, keepCount: number): Promise<void> {
     const entries = await readdir(directoryPath, { withFileTypes: true });
     const files = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".zip"));
@@ -1109,9 +1248,12 @@ export class SessionManager {
     );
   }
 
-  private async pickSavePath(): Promise<string> {
+  private async pickSavePath(range?: { startMs: number; endMs: number } | null): Promise<string> {
     const saveDir = this.captureSettings.defaultSessionSaveDir.trim() || app.getPath("documents");
-    const defaultPath = path.join(saveDir, this.buildArchiveFileName());
+    const suffix = range
+      ? `-range-${Math.round(range.startMs)}ms-${Math.round(range.endMs)}ms`
+      : "";
+    const defaultPath = path.join(saveDir, this.buildArchiveFileName(suffix));
     const result = await dialog.showSaveDialog({
       title: "Save Tracer Session",
       defaultPath,
@@ -1143,9 +1285,21 @@ export class SessionManager {
     return path.relative(this.sessionRoot, filePath).split(path.sep).join("/");
   }
 
-  private buildArchiveFileName(): string {
+  private buildArchiveFileName(suffix = ""): string {
     const timestampMs = this.status.captureStartedAt ?? this.status.createdAt ?? Date.now();
-    return `${this.formatTimestampForFilename(timestampMs)}.zip`;
+    return `${this.formatTimestampForFilename(timestampMs)}${suffix}.zip`;
+  }
+
+  private sortEvents(events: CaptureEvent[]): CaptureEvent[] {
+    return events.slice().sort((a, b) => {
+      if (a.tsMs !== b.tsMs) {
+        return a.tsMs - b.tsMs;
+      }
+      if (a.tRelMs !== b.tRelMs) {
+        return a.tRelMs - b.tRelMs;
+      }
+      return a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: "base" });
+    });
   }
 
   private getTimelineCaptureStartAtMs(): number | null {

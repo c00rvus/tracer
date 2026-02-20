@@ -9,7 +9,8 @@ const api: TracerApi = {
     pauseCapture: () => ipcRenderer.invoke(IPC_CHANNELS.pauseCapture),
     resumeCapture: () => ipcRenderer.invoke(IPC_CHANNELS.resumeCapture),
     stopCapture: () => ipcRenderer.invoke(IPC_CHANNELS.stopCapture),
-    save: (filePath?: string) => ipcRenderer.invoke(IPC_CHANNELS.save, filePath),
+    save: (filePath?: string, options?: { range?: { startMs: number; endMs: number } | null }) =>
+      ipcRenderer.invoke(IPC_CHANNELS.save, filePath, options),
     open: (filePath?: string) => ipcRenderer.invoke(IPC_CHANNELS.open, filePath),
     getTimeline: (sessionId: string) => ipcRenderer.invoke(IPC_CHANNELS.getTimeline, sessionId),
     getEvent: (eventId: string) => ipcRenderer.invoke(IPC_CHANNELS.getEvent, eventId),

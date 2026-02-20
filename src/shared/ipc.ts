@@ -1,6 +1,7 @@
 import type {
   AppSettings,
   CaptureEvent,
+  SaveSessionOptions,
   SavedSessionResult,
   ScreenshotPayload,
   SessionStatus
@@ -12,7 +13,7 @@ export interface SessionApi {
   pauseCapture(): Promise<SessionStatus>;
   resumeCapture(): Promise<SessionStatus>;
   stopCapture(): Promise<SessionStatus>;
-  save(path?: string): Promise<SavedSessionResult>;
+  save(path?: string, options?: SaveSessionOptions): Promise<SavedSessionResult>;
   open(path?: string): Promise<SessionStatus>;
   getTimeline(sessionId: string): Promise<CaptureEvent[]>;
   getEvent(eventId: string): Promise<CaptureEvent | null>;

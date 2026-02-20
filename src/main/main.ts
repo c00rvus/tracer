@@ -9,7 +9,7 @@ import {
   type NativeImage
 } from "electron";
 import log from "electron-log";
-import type { AppSettings } from "../shared/types";
+import type { AppSettings, SaveSessionOptions } from "../shared/types";
 import { IPC_CHANNELS } from "./ipcChannels";
 import { SettingsStore } from "./settings/SettingsStore";
 import { SessionManager } from "./session/SessionManager";
@@ -129,8 +129,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.pauseCapture, async () => requireSessionManager().pauseCapture());
   ipcMain.handle(IPC_CHANNELS.resumeCapture, async () => requireSessionManager().resumeCapture());
   ipcMain.handle(IPC_CHANNELS.stopCapture, async () => requireSessionManager().stopCapture());
-  ipcMain.handle(IPC_CHANNELS.save, async (_event, filePath?: string) =>
-    requireSessionManager().save(filePath)
+  ipcMain.handle(IPC_CHANNELS.save, async (_event, filePath?: string, options?: SaveSessionOptions) =>
+    requireSessionManager().save(filePath, options)
   );
   ipcMain.handle(IPC_CHANNELS.open, async (_event, filePath?: string) =>
     requireSessionManager().open(filePath)
