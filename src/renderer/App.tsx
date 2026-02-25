@@ -60,6 +60,8 @@ function isUserCanceledMessage(message: string): boolean {
 }
 
 const BANNER_AUTO_HIDE_MS = 5000;
+const MAX_TIMELINE_THUMBNAIL_CACHE = 240;
+const MAX_FULL_SCREENSHOT_CACHE = 10;
 const LONG_CAPTURE_WARNING_MESSAGE =
   "This session has been recording for a long time. Make sure you don't leave capture running unintentionally.";
 const LONG_CAPTURE_WARNING_TITLE = "Long recording reminder";
@@ -96,6 +98,57 @@ function writeStoredBoolean(key: string, value: boolean): void {
   }
 }
 
+function areStringListsEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function pruneScreenshotCache(
+  cache: Record<string, ScreenshotPayload>,
+  usageMap: Map<string, number>,
+  maxEntries: number,
+  protectedIds: Set<string>
+): Record<string, ScreenshotPayload> {
+  const keys = Object.keys(cache);
+  if (keys.length <= maxEntries) {
+    return cache;
+  }
+
+  const removable = keys.filter((id) => !protectedIds.has(id));
+  if (removable.length === 0) {
+    return cache;
+  }
+
+  const overflowCount = keys.length - maxEntries;
+  if (overflowCount <= 0) {
+    return cache;
+  }
+
+  removable.sort((left, right) => (usageMap.get(left) ?? 0) - (usageMap.get(right) ?? 0));
+  const idsToDrop = new Set(removable.slice(0, overflowCount));
+  if (idsToDrop.size === 0) {
+    return cache;
+  }
+
+  const next: Record<string, ScreenshotPayload> = {};
+  for (const [id, payload] of Object.entries(cache)) {
+    if (idsToDrop.has(id)) {
+      usageMap.delete(id);
+      continue;
+    }
+    next[id] = payload;
+  }
+
+  return next;
+}
+
 export function App(): JSX.Element {
   const platform = window.tracer.window.platform;
   const isWindows = platform === "win32";
@@ -107,6 +160,8 @@ export function App(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [screenshotById, setScreenshotById] = useState<Record<string, ScreenshotPayload>>({});
+  const [fullScreenshotById, setFullScreenshotById] = useState<Record<string, ScreenshotPayload>>({});
+  const [visibleTimelineScreenshotIds, setVisibleTimelineScreenshotIds] = useState<string[]>([]);
   const [hoveredActionWindow, setHoveredActionWindow] = useState<{
     startMs: number;
     durationMs: number;
@@ -137,6 +192,11 @@ export function App(): JSX.Element {
 
   const loadingScreenshotIdsRef = useRef<Set<string>>(new Set());
   const missingScreenshotIdsRef = useRef<Set<string>>(new Set());
+  const loadingFullScreenshotIdsRef = useRef<Set<string>>(new Set());
+  const missingFullScreenshotIdsRef = useRef<Set<string>>(new Set());
+  const thumbnailUsageRef = useRef<Map<string, number>>(new Map());
+  const fullScreenshotUsageRef = useRef<Map<string, number>>(new Map());
+  const usageTickRef = useRef(0);
   const dismissedStatusErrorRef = useRef<string | null>(null);
   const longCaptureWarningStateRef = useRef<{ key: string | null; lastReminderSlot: number }>({
     key: null,
@@ -252,9 +312,23 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     setScreenshotById({});
+    setFullScreenshotById({});
+    setVisibleTimelineScreenshotIds([]);
     loadingScreenshotIdsRef.current.clear();
     missingScreenshotIdsRef.current.clear();
+    loadingFullScreenshotIdsRef.current.clear();
+    missingFullScreenshotIdsRef.current.clear();
+    thumbnailUsageRef.current.clear();
+    fullScreenshotUsageRef.current.clear();
+    usageTickRef.current = 0;
   }, [status.sessionId]);
+
+  const touchUsage = useCallback((usageMap: Map<string, number>, ids: Iterable<string>) => {
+    for (const id of ids) {
+      usageTickRef.current += 1;
+      usageMap.set(id, usageTickRef.current);
+    }
+  }, []);
 
   const sortedTimeline = useMemo(() => sortTimeline(timeline), [timeline]);
   const logsTimeline = useMemo(() => {
@@ -297,83 +371,6 @@ export function App(): JSX.Element {
     [sortedTimeline]
   );
 
-  useEffect(() => {
-    if (screenshotEvents.length === 0) {
-      return;
-    }
-
-    const missing = screenshotEvents.filter((event) => {
-      if (screenshotById[event.screenshotId]) {
-        missingScreenshotIdsRef.current.delete(event.screenshotId);
-        return false;
-      }
-      if (missingScreenshotIdsRef.current.has(event.screenshotId)) {
-        return false;
-      }
-      return !loadingScreenshotIdsRef.current.has(event.screenshotId);
-    });
-    if (missing.length === 0) {
-      return;
-    }
-
-    for (const event of missing) {
-      loadingScreenshotIdsRef.current.add(event.screenshotId);
-    }
-
-    let canceled = false;
-
-    void Promise.all(
-      missing.map(async (event) => {
-        let payload: ScreenshotPayload | null = null;
-        try {
-          payload = await window.tracer.session.getScreenshot(event.screenshotId);
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-          if (!message.includes("enoent")) {
-            throw error;
-          }
-          payload = null;
-        }
-        return {
-          screenshotId: event.screenshotId,
-          payload
-        };
-      })
-    )
-      .then((results) => {
-        if (canceled) {
-          return;
-        }
-        setScreenshotById((previous) => {
-          const next = { ...previous };
-          for (const result of results) {
-            if (result.payload) {
-              next[result.screenshotId] = result.payload;
-              missingScreenshotIdsRef.current.delete(result.screenshotId);
-            } else {
-              missingScreenshotIdsRef.current.add(result.screenshotId);
-            }
-          }
-          return next;
-        });
-      })
-      .catch((error) => {
-        if (!canceled) {
-          setErrorMessage(error instanceof Error ? error.message : "Failed to load screenshot.");
-        }
-      })
-      .finally(() => {
-        for (const event of missing) {
-          loadingScreenshotIdsRef.current.delete(event.screenshotId);
-        }
-      });
-
-    return () => {
-      canceled = true;
-    };
-  }, [screenshotById, screenshotEvents]);
-
   const filmstripFrames = useMemo<FilmstripFrameViewModel[]>(() => {
     return screenshotEvents.map((event) => ({
       event,
@@ -408,6 +405,223 @@ export function App(): JSX.Element {
   const currentFrame = selectedFilmstripEventId
     ? frameByEventId.get(selectedFilmstripEventId) ?? null
     : null;
+  const currentFramePayload = currentFrame
+    ? fullScreenshotById[currentFrame.event.screenshotId] ?? currentFrame.payload
+    : null;
+
+  const handleVisibleScreenshotIdsChange = useCallback((screenshotIds: string[]) => {
+    setVisibleTimelineScreenshotIds((previous) =>
+      areStringListsEqual(previous, screenshotIds) ? previous : screenshotIds
+    );
+  }, []);
+
+  const protectedThumbnailIds = useMemo(() => {
+    const ids = new Set<string>(visibleTimelineScreenshotIds);
+    if (currentFrame?.event.screenshotId) {
+      ids.add(currentFrame.event.screenshotId);
+    }
+    return ids;
+  }, [currentFrame?.event.screenshotId, visibleTimelineScreenshotIds]);
+
+  useEffect(() => {
+    if (protectedThumbnailIds.size === 0) {
+      return;
+    }
+    touchUsage(thumbnailUsageRef.current, protectedThumbnailIds);
+  }, [protectedThumbnailIds, touchUsage]);
+
+  useEffect(() => {
+    if (screenshotEvents.length === 0) {
+      return;
+    }
+
+    const knownIds = new Set(screenshotEvents.map((event) => event.screenshotId));
+    const requestedIds = new Set<string>();
+
+    for (const screenshotId of visibleTimelineScreenshotIds) {
+      if (knownIds.has(screenshotId)) {
+        requestedIds.add(screenshotId);
+      }
+    }
+
+    const currentScreenshotId = currentFrame?.event.screenshotId;
+    if (currentScreenshotId && knownIds.has(currentScreenshotId)) {
+      requestedIds.add(currentScreenshotId);
+    }
+
+    if (requestedIds.size === 0) {
+      return;
+    }
+
+    const maxBatchSize = 24;
+    const batch = Array.from(requestedIds)
+      .filter((screenshotId) => {
+        if (screenshotById[screenshotId]) {
+          touchUsage(thumbnailUsageRef.current, [screenshotId]);
+          missingScreenshotIdsRef.current.delete(screenshotId);
+          return false;
+        }
+        if (missingScreenshotIdsRef.current.has(screenshotId)) {
+          return false;
+        }
+        return !loadingScreenshotIdsRef.current.has(screenshotId);
+      })
+      .slice(0, maxBatchSize);
+
+    if (batch.length === 0) {
+      return;
+    }
+
+    for (const screenshotId of batch) {
+      loadingScreenshotIdsRef.current.add(screenshotId);
+    }
+
+    let canceled = false;
+
+    void Promise.all(
+      batch.map(async (screenshotId) => {
+        let payload: ScreenshotPayload | null = null;
+        try {
+          payload = await window.tracer.session.getScreenshot(screenshotId, "thumbnail");
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+          if (!message.includes("enoent")) {
+            throw error;
+          }
+          payload = null;
+        }
+        return {
+          screenshotId,
+          payload
+        };
+      })
+    )
+      .then((results) => {
+        if (canceled) {
+          return;
+        }
+        touchUsage(
+          thumbnailUsageRef.current,
+          results.filter((result) => Boolean(result.payload)).map((result) => result.screenshotId)
+        );
+        setScreenshotById((previous) => {
+          const next = { ...previous };
+          for (const result of results) {
+            if (result.payload) {
+              next[result.screenshotId] = result.payload;
+              missingScreenshotIdsRef.current.delete(result.screenshotId);
+            } else {
+              missingScreenshotIdsRef.current.add(result.screenshotId);
+            }
+          }
+          return pruneScreenshotCache(
+            next,
+            thumbnailUsageRef.current,
+            MAX_TIMELINE_THUMBNAIL_CACHE,
+            protectedThumbnailIds
+          );
+        });
+      })
+      .catch((error) => {
+        if (!canceled) {
+          setErrorMessage(error instanceof Error ? error.message : "Failed to load screenshot.");
+        }
+      })
+      .finally(() => {
+        for (const screenshotId of batch) {
+          loadingScreenshotIdsRef.current.delete(screenshotId);
+        }
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [
+    currentFrame?.event.screenshotId,
+    protectedThumbnailIds,
+    screenshotById,
+    screenshotEvents,
+    touchUsage,
+    visibleTimelineScreenshotIds
+  ]);
+
+  useEffect(() => {
+    setScreenshotById((previous) =>
+      pruneScreenshotCache(
+        previous,
+        thumbnailUsageRef.current,
+        MAX_TIMELINE_THUMBNAIL_CACHE,
+        protectedThumbnailIds
+      )
+    );
+  }, [protectedThumbnailIds]);
+
+  useEffect(() => {
+    const screenshotId = currentFrame?.event.screenshotId;
+    if (!screenshotId) {
+      return;
+    }
+    if (fullScreenshotById[screenshotId]) {
+      touchUsage(fullScreenshotUsageRef.current, [screenshotId]);
+      missingFullScreenshotIdsRef.current.delete(screenshotId);
+      return;
+    }
+    if (loadingFullScreenshotIdsRef.current.has(screenshotId)) {
+      return;
+    }
+    if (missingFullScreenshotIdsRef.current.has(screenshotId)) {
+      return;
+    }
+
+    loadingFullScreenshotIdsRef.current.add(screenshotId);
+    let canceled = false;
+
+    void window.tracer.session
+      .getScreenshot(screenshotId, "full")
+      .then((payload) => {
+        if (canceled) {
+          return;
+        }
+        if (!payload) {
+          missingFullScreenshotIdsRef.current.add(screenshotId);
+          return;
+        }
+        touchUsage(fullScreenshotUsageRef.current, [screenshotId]);
+        setFullScreenshotById((previous) => {
+          const next = {
+            ...previous,
+            [screenshotId]: payload
+          };
+          return pruneScreenshotCache(
+            next,
+            fullScreenshotUsageRef.current,
+            MAX_FULL_SCREENSHOT_CACHE,
+            new Set<string>([screenshotId])
+          );
+        });
+        missingFullScreenshotIdsRef.current.delete(screenshotId);
+      })
+      .catch((error) => {
+        if (canceled) {
+          return;
+        }
+        const message =
+          error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+        if (message.includes("enoent")) {
+          missingFullScreenshotIdsRef.current.add(screenshotId);
+          return;
+        }
+        setErrorMessage(error instanceof Error ? error.message : "Failed to load screenshot.");
+      })
+      .finally(() => {
+        loadingFullScreenshotIdsRef.current.delete(screenshotId);
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [currentFrame?.event.screenshotId, fullScreenshotById, touchUsage]);
 
   const eventRows = useMemo(() => toEventRows(logsTimeline), [logsTimeline]);
   const filteredRows = useMemo(
@@ -894,6 +1108,7 @@ export function App(): JSX.Element {
         selectedRange={selectedTimeRange}
         onSelectEvent={handleSelectFilmstripEvent}
         onRangeChange={handleRangeChange}
+        onVisibleScreenshotIdsChange={handleVisibleScreenshotIdsChange}
       />
 
       <ResizableSplit
@@ -931,6 +1146,7 @@ export function App(): JSX.Element {
               <PreviewPanel
                 selectedEvent={selectedEvent}
                 currentFrame={currentFrame}
+                currentFramePayload={currentFramePayload}
                 liveScreenshotSyncEnabled={liveScreenshotSyncEnabled}
                 onToggleLiveScreenshotSync={handleToggleLiveScreenshotSync}
                 toggleDisabled={busy}

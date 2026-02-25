@@ -18,7 +18,10 @@ export interface SessionApi {
   open(path?: string): Promise<SessionStatus>;
   getTimeline(sessionId: string): Promise<CaptureEvent[]>;
   getEvent(eventId: string): Promise<CaptureEvent | null>;
-  getScreenshot(screenshotId: string): Promise<ScreenshotPayload | null>;
+  getScreenshot(
+    screenshotId: string,
+    variant?: "thumbnail" | "full"
+  ): Promise<ScreenshotPayload | null>;
   getNetworkBody(bodyPath: string): Promise<NetworkBodyPayload | null>;
   getStatus(): Promise<SessionStatus>;
   getSettings(): Promise<AppSettings>;

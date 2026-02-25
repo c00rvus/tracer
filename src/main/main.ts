@@ -1,4 +1,5 @@
 import path from "node:path";
+import { readFile } from "node:fs/promises";
 import {
   app,
   BrowserWindow,
@@ -6,6 +7,7 @@ import {
   ipcMain,
   Notification,
   nativeImage,
+  protocol,
   type NativeImage
 } from "electron";
 import log from "electron-log";
@@ -20,9 +22,97 @@ let settingsStore: SettingsStore | null = null;
 let allowMainWindowClose = false;
 let closePromptInFlight = false;
 let clearAttentionTimer: NodeJS.Timeout | null = null;
+const MEDIA_PROTOCOL_SCHEME = "tracer-media";
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: MEDIA_PROTOCOL_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true
+    }
+  }
+]);
 
 function resolveIconPath(): string {
   return path.join(app.getAppPath(), "build", "icon.png");
+}
+
+function toAllowedMediaRoots(): string[] {
+  const tempRoot = app.getPath("temp");
+  return [
+    path.join(tempRoot, "tracer-desktop-live"),
+    path.join(tempRoot, "tracer-desktop-open"),
+    path.join(tempRoot, "tracer-desktop-range-export"),
+    path.join(tempRoot, "tracer-desktop-autosave")
+  ];
+}
+
+function isPathInside(basePath: string, candidatePath: string): boolean {
+  const base = path.resolve(basePath);
+  const candidate = path.resolve(candidatePath);
+  return candidate === base || candidate.startsWith(`${base}${path.sep}`);
+}
+
+function isAllowedMediaPath(candidatePath: string): boolean {
+  if (!candidatePath) {
+    return false;
+  }
+  return toAllowedMediaRoots().some((root) => isPathInside(root, candidatePath));
+}
+
+function mediaContentType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") {
+    return "image/jpeg";
+  }
+  if (ext === ".webp") {
+    return "image/webp";
+  }
+  return "image/png";
+}
+
+function decodeMediaPath(encodedPath: string): string | null {
+  try {
+    return Buffer.from(encodedPath, "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function registerMediaProtocol(): void {
+  protocol.handle(MEDIA_PROTOCOL_SCHEME, async (request) => {
+    try {
+      const requestUrl = new URL(request.url);
+      if (requestUrl.hostname !== "file") {
+        return new Response("Not found", { status: 404 });
+      }
+
+      const encodedPath = requestUrl.pathname.replace(/^\/+/u, "");
+      const decodedPath = decodeMediaPath(encodedPath);
+      if (!decodedPath) {
+        return new Response("Invalid path", { status: 400 });
+      }
+
+      const absolutePath = path.resolve(decodedPath);
+      if (!isAllowedMediaPath(absolutePath)) {
+        return new Response("Forbidden", { status: 403 });
+      }
+
+      const fileBuffer = await readFile(absolutePath);
+      return new Response(fileBuffer, {
+        status: 200,
+        headers: {
+          "content-type": mediaContentType(absolutePath),
+          "cache-control": "public, max-age=31536000, immutable"
+        }
+      });
+    } catch {
+      return new Response("Not found", { status: 404 });
+    }
+  });
 }
 
 function emitWindowState(): void {
@@ -142,8 +232,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.getEvent, async (_event, eventId: string) =>
     requireSessionManager().getEvent(eventId)
   );
-  ipcMain.handle(IPC_CHANNELS.getScreenshot, async (_event, screenshotId: string) =>
-    requireSessionManager().getScreenshot(screenshotId)
+  ipcMain.handle(
+    IPC_CHANNELS.getScreenshot,
+    async (_event, screenshotId: string, variant?: "thumbnail" | "full") =>
+      requireSessionManager().getScreenshot(screenshotId, variant)
   );
   ipcMain.handle(IPC_CHANNELS.getNetworkBody, async (_event, bodyPath: string) =>
     requireSessionManager().getNetworkBody(bodyPath)
@@ -347,6 +439,7 @@ app.on("before-quit", () => {
 app
   .whenReady()
   .then(async () => {
+    registerMediaProtocol();
     settingsStore = new SettingsStore();
     const startupSettings = await settingsStore.load();
     sessionManager = new SessionManager(startupSettings);

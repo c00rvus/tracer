@@ -25,6 +25,7 @@ interface FilmstripTimelineProps {
   selectedRange: TimelineRange | null;
   onSelectEvent: (eventId: string) => void;
   onRangeChange: (range: TimelineRange | null) => void;
+  onVisibleScreenshotIdsChange?: (screenshotIds: string[]) => void;
 }
 
 interface PositionedFrame {
@@ -54,15 +55,18 @@ export function FilmstripTimeline({
   rangeSelectionEnabled,
   selectedRange,
   onSelectEvent,
-  onRangeChange
+  onRangeChange,
+  onVisibleScreenshotIdsChange
 }: FilmstripTimelineProps): JSX.Element {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const selectedFrameRef = useRef<HTMLButtonElement | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
+  const viewportRafRef = useRef<number | null>(null);
   const suppressThumbClickUntilMsRef = useRef(0);
   const rangeDragActiveRef = useRef(false);
   const skipNextAutoScrollRef = useRef(false);
   const [dragSelection, setDragSelection] = useState<TimelineRange | null>(null);
+  const [viewport, setViewport] = useState({ scrollLeft: 0, clientWidth: 0 });
 
   const layout = useMemo(() => {
     const minFrameWidth = 56;
@@ -124,6 +128,85 @@ export function FilmstripTimeline({
     },
     [layout.pxPerMs, layout.totalWidth]
   );
+
+  const updateViewport = useCallback(() => {
+    const container = scrollRef.current;
+    if (!container) {
+      return;
+    }
+    const next = {
+      scrollLeft: container.scrollLeft,
+      clientWidth: container.clientWidth
+    };
+    setViewport((previous) => {
+      if (
+        Math.abs(previous.scrollLeft - next.scrollLeft) < 1 &&
+        previous.clientWidth === next.clientWidth
+      ) {
+        return previous;
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) {
+      return;
+    }
+
+    const scheduleViewportUpdate = (): void => {
+      if (viewportRafRef.current !== null) {
+        return;
+      }
+      viewportRafRef.current = window.requestAnimationFrame(() => {
+        viewportRafRef.current = null;
+        updateViewport();
+      });
+    };
+
+    updateViewport();
+    container.addEventListener("scroll", scheduleViewportUpdate, { passive: true });
+    window.addEventListener("resize", scheduleViewportUpdate);
+
+    return () => {
+      container.removeEventListener("scroll", scheduleViewportUpdate);
+      window.removeEventListener("resize", scheduleViewportUpdate);
+      if (viewportRafRef.current !== null) {
+        window.cancelAnimationFrame(viewportRafRef.current);
+        viewportRafRef.current = null;
+      }
+    };
+  }, [updateViewport]);
+
+  const renderedPositioned = useMemo(() => {
+    if (layout.positioned.length === 0 || viewport.clientWidth <= 0) {
+      return layout.positioned;
+    }
+
+    const bufferPx = 640;
+    const startPx = Math.max(0, viewport.scrollLeft - bufferPx);
+    const endPx = viewport.scrollLeft + viewport.clientWidth + bufferPx;
+
+    return layout.positioned.filter(({ frame, leftPx, widthPx }) => {
+      if (selectedEventId === frame.event.id) {
+        return true;
+      }
+      return leftPx + widthPx >= startPx && leftPx <= endPx;
+    });
+  }, [layout.positioned, selectedEventId, viewport.clientWidth, viewport.scrollLeft]);
+
+  const visibleScreenshotIds = useMemo(
+    () => renderedPositioned.map(({ frame }) => frame.event.screenshotId),
+    [renderedPositioned]
+  );
+
+  useEffect(() => {
+    if (!onVisibleScreenshotIdsChange) {
+      return;
+    }
+    onVisibleScreenshotIdsChange(visibleScreenshotIds);
+  }, [onVisibleScreenshotIdsChange, visibleScreenshotIds]);
 
   const handleRangeMouseDown = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -304,7 +387,7 @@ export function FilmstripTimeline({
               <div className="filmstrip-empty">No screenshots captured</div>
             )}
 
-            {layout.positioned.map(({ frame, leftPx, widthPx }) => {
+            {renderedPositioned.map(({ frame, leftPx, widthPx }) => {
               const selected = selectedEventId === frame.event.id;
               const inSelectedRange =
                 !selectedRange ||
@@ -319,7 +402,12 @@ export function FilmstripTimeline({
                   onClick={() => handleThumbClick(frame.event.id, inSelectedRange)}
                 >
                   {frame.payload ? (
-                    <img src={frame.payload.dataUrl} alt={frame.payload.path} />
+                    <img
+                      src={frame.payload.url ?? frame.payload.dataUrl}
+                      alt={frame.payload.path}
+                      loading="lazy"
+                      decoding="async"
+                    />
                   ) : (
                     <div className="thumb-placeholder">loading</div>
                   )}

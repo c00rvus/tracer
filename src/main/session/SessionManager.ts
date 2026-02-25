@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createWriteStream, WriteStream } from "node:fs";
 import { copyFile, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { app, dialog } from "electron";
+import { app, dialog, nativeImage } from "electron";
 import log from "electron-log";
 import {
   type BrowserContext,
@@ -66,6 +66,130 @@ const STATUS_TEMPLATE: SessionStatus = {
 
 const SCHEMA_VERSION = "1.0.0";
 const MAX_TEMP_AUTOSAVES = 2;
+const TIMELINE_THUMBNAIL_WIDTH_PX = 240;
+const TIMELINE_THUMBNAIL_QUALITY = 72;
+const TRACER_MEDIA_PROTOCOL_SCHEME = "tracer-media";
+const CURSOR_OVERLAY_INIT_SCRIPT = `
+(() => {
+  const globalState = globalThis;
+  if (globalState.__tracerCursorOverlayInstalled) {
+    return;
+  }
+  globalState.__tracerCursorOverlayInstalled = true;
+
+  const overlayId = "__tracer-cursor-overlay";
+  let overlay = null;
+  let x = 0;
+  let y = 0;
+  let frame = 0;
+
+  const ensureOverlay = () => {
+    if (overlay && overlay.isConnected) {
+      return overlay;
+    }
+    const root = document.documentElement || document.body;
+    if (!root) {
+      return null;
+    }
+
+    const existing = document.getElementById(overlayId);
+    if (existing) {
+      overlay = existing;
+      return overlay;
+    }
+
+    const element = document.createElement("div");
+    element.id = overlayId;
+    element.setAttribute("aria-hidden", "true");
+    element.style.position = "fixed";
+    element.style.left = "0px";
+    element.style.top = "0px";
+    element.style.width = "12px";
+    element.style.height = "12px";
+    element.style.borderRadius = "999px";
+    element.style.background = "rgba(255,255,255,0.92)";
+    element.style.border = "1.5px solid rgba(20,23,30,0.95)";
+    element.style.boxShadow = "0 0 0 2px rgba(38,132,255,0.25), 0 1px 3px rgba(0,0,0,0.35)";
+    element.style.transform = "translate(-2px, -2px) scale(1)";
+    element.style.transformOrigin = "top left";
+    element.style.pointerEvents = "none";
+    element.style.zIndex = "2147483647";
+    element.style.opacity = "0";
+    element.style.transition = "opacity 80ms linear, transform 60ms linear";
+    root.appendChild(element);
+    overlay = element;
+    return overlay;
+  };
+
+  const render = () => {
+    frame = 0;
+    const element = ensureOverlay();
+    if (!element) {
+      return;
+    }
+    element.style.left = x + "px";
+    element.style.top = y + "px";
+    element.style.opacity = "1";
+  };
+
+  const queueRender = () => {
+    if (frame) {
+      return;
+    }
+    frame = requestAnimationFrame(render);
+  };
+
+  const hide = () => {
+    const element = ensureOverlay();
+    if (!element) {
+      return;
+    }
+    element.style.opacity = "0";
+  };
+
+  const handleMove = (event) => {
+    x = event.clientX;
+    y = event.clientY;
+    queueRender();
+  };
+
+  const press = () => {
+    const element = ensureOverlay();
+    if (!element) {
+      return;
+    }
+    element.style.transform = "translate(-2px, -2px) scale(0.9)";
+  };
+
+  const release = () => {
+    const element = ensureOverlay();
+    if (!element) {
+      return;
+    }
+    element.style.transform = "translate(-2px, -2px) scale(1)";
+  };
+
+  const install = () => {
+    ensureOverlay();
+    window.addEventListener("mousemove", handleMove, { capture: true, passive: true });
+    window.addEventListener("mouseleave", hide, { capture: true, passive: true });
+    window.addEventListener("mousedown", press, { capture: true, passive: true });
+    window.addEventListener("mouseup", release, { capture: true, passive: true });
+    window.addEventListener("blur", hide, { passive: true });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        hide();
+      }
+    });
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", install, { once: true });
+  } else {
+    install();
+  }
+})();
+`;
 
 type PlaywrightModule = typeof import("playwright");
 let playwrightModulePromise: Promise<PlaywrightModule> | null = null;
@@ -92,8 +216,10 @@ export class SessionManager {
   private events: CaptureEvent[] = [];
   private eventById = new Map<string, CaptureEvent>();
   private screenshotPathById = new Map<string, string>();
+  private screenshotThumbnailPathById = new Map<string, string>();
   private lastScreenshotEvent: ScreenshotEvent | null = null;
   private screenshotRun: Promise<void> | null = null;
+  private thumbnailWritesByPath = new Map<string, Promise<void>>();
 
   private responseByRequestId = new Map<string, PendingResponse>();
   private requestUrlById = new Map<string, string>();
@@ -199,6 +325,7 @@ export class SessionManager {
       this.page = this.context.pages()[0] ?? (await this.context.newPage());
       this.context.on("close", this.contextCloseHandler);
       this.page.on("close", this.pageCloseHandler);
+      await this.installMouseCursorOverlay();
       await this.openDefaultStartUrl();
 
       this.status.state = "browser_ready";
@@ -381,11 +508,17 @@ export class SessionManager {
       this.events = this.sortEvents(events);
       this.eventById.clear();
       this.screenshotPathById.clear();
+      this.screenshotThumbnailPathById.clear();
       this.lastScreenshotEvent = null;
       for (const event of this.events) {
         this.eventById.set(event.id, event);
         if (event.kind === "screenshot") {
-          this.screenshotPathById.set(event.screenshotId, path.join(extractRoot, event.path));
+          const screenshotPath = path.join(extractRoot, event.path);
+          this.screenshotPathById.set(event.screenshotId, screenshotPath);
+          this.screenshotThumbnailPathById.set(
+            event.screenshotId,
+            this.toThumbnailAbsolutePath(screenshotPath)
+          );
           this.lastScreenshotEvent = event;
         }
       }
@@ -408,31 +541,113 @@ export class SessionManager {
     return this.eventById.get(eventId) ?? null;
   }
 
-  public async getScreenshot(screenshotId: string): Promise<ScreenshotPayload | null> {
-    const imagePath = this.screenshotPathById.get(screenshotId);
-    if (!imagePath) {
+  public async getScreenshot(
+    screenshotId: string,
+    variant: "thumbnail" | "full" = "thumbnail"
+  ): Promise<ScreenshotPayload | null> {
+    const fullImagePath = this.screenshotPathById.get(screenshotId);
+    if (!fullImagePath) {
       return null;
     }
-    let data: Buffer;
-    try {
-      data = await readFile(imagePath);
-    } catch (error) {
-      const code =
-        typeof error === "object" && error !== null && "code" in error
-          ? String((error as { code?: string }).code)
-          : "";
-      if (code === "ENOENT") {
-        return null;
-      }
-      throw error;
+
+    const fullExists = await this.pathExists(fullImagePath);
+    if (!fullExists) {
+      return null;
     }
-    const relPath = this.toSessionRelativePath(imagePath);
+
+    let targetPath = fullImagePath;
+    if (variant === "thumbnail") {
+      targetPath = await this.ensureThumbnailForScreenshot(screenshotId);
+      if (!targetPath) {
+        targetPath = fullImagePath;
+      }
+    }
+
+    const relPath = this.toSessionRelativePath(targetPath);
     return {
       screenshotId,
       path: relPath,
-      mimeType: "image/png",
-      dataUrl: `data:image/png;base64,${data.toString("base64")}`
+      mimeType: this.inferImageMimeType(targetPath),
+      url: this.toMediaUrl(targetPath),
+      variant
     };
+  }
+
+  private async ensureThumbnailForScreenshot(screenshotId: string): Promise<string> {
+    const imagePath = this.screenshotPathById.get(screenshotId);
+    if (!imagePath) {
+      return "";
+    }
+
+    const existingThumbnailPath =
+      this.screenshotThumbnailPathById.get(screenshotId) ?? this.toThumbnailAbsolutePath(imagePath);
+    this.screenshotThumbnailPathById.set(screenshotId, existingThumbnailPath);
+
+    if (await this.pathExists(existingThumbnailPath)) {
+      return existingThumbnailPath;
+    }
+
+    let writePromise = this.thumbnailWritesByPath.get(existingThumbnailPath);
+    if (!writePromise) {
+      writePromise = this.generateThumbnailFile(imagePath, existingThumbnailPath).finally(() => {
+        this.thumbnailWritesByPath.delete(existingThumbnailPath);
+      });
+      this.thumbnailWritesByPath.set(existingThumbnailPath, writePromise);
+    }
+
+    try {
+      await writePromise;
+    } catch {
+      return imagePath;
+    }
+
+    return (await this.pathExists(existingThumbnailPath)) ? existingThumbnailPath : imagePath;
+  }
+
+  private async generateThumbnailFile(imagePath: string, thumbnailPath: string): Promise<void> {
+    const imageBuffer = await readFile(imagePath);
+    const image = nativeImage.createFromBuffer(imageBuffer);
+    if (image.isEmpty()) {
+      throw new Error("Failed to decode screenshot image.");
+    }
+
+    const size = image.getSize();
+    const width = Math.max(64, Math.min(TIMELINE_THUMBNAIL_WIDTH_PX, size.width || TIMELINE_THUMBNAIL_WIDTH_PX));
+    const source = size.width > width ? image.resize({ width, quality: "good" }) : image;
+    const thumbnailBuffer = source.toJPEG(TIMELINE_THUMBNAIL_QUALITY);
+    await ensureDir(path.dirname(thumbnailPath));
+    await writeFile(thumbnailPath, thumbnailBuffer);
+  }
+
+  private toThumbnailAbsolutePath(imagePath: string): string {
+    const parsed = path.parse(imagePath);
+    return path.join(parsed.dir, "thumbs", `${parsed.name}.jpg`);
+  }
+
+  private inferImageMimeType(filePath: string): string {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === ".jpg" || ext === ".jpeg") {
+      return "image/jpeg";
+    }
+    if (ext === ".webp") {
+      return "image/webp";
+    }
+    return "image/png";
+  }
+
+  private toMediaUrl(filePath: string): string {
+    const absolutePath = path.resolve(filePath);
+    const encodedPath = Buffer.from(absolutePath, "utf8").toString("base64url");
+    return `${TRACER_MEDIA_PROTOCOL_SCHEME}://file/${encodedPath}`;
+  }
+
+  private async pathExists(filePath: string): Promise<boolean> {
+    try {
+      await stat(filePath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   public async getNetworkBody(bodyPath: string): Promise<NetworkBodyPayload | null> {
@@ -490,6 +705,7 @@ export class SessionManager {
     this.events = [];
     this.eventById.clear();
     this.screenshotPathById.clear();
+    this.screenshotThumbnailPathById.clear();
     this.lastScreenshotEvent = null;
     this.requestUrlById.clear();
     this.responseByRequestId.clear();
@@ -623,7 +839,12 @@ export class SessionManager {
     this.status.counts.events += 1;
     if (event.kind === "screenshot") {
       this.status.counts.screenshots += 1;
-      this.screenshotPathById.set(event.screenshotId, path.join(this.sessionRoot ?? "", event.path));
+      const screenshotPath = path.join(this.sessionRoot ?? "", event.path);
+      this.screenshotPathById.set(event.screenshotId, screenshotPath);
+      this.screenshotThumbnailPathById.set(
+        event.screenshotId,
+        this.toThumbnailAbsolutePath(screenshotPath)
+      );
       this.lastScreenshotEvent = event;
     }
     if (event.kind === "network_request") {
@@ -915,6 +1136,9 @@ export class SessionManager {
       reason
     };
     this.appendEvent(event);
+    void this.ensureThumbnailForScreenshot(screenshotId).catch((error) => {
+      log.warn("Failed to pre-generate screenshot thumbnail.", error);
+    });
   }
 
   private async captureScreenshotWithRetry(
@@ -1035,6 +1259,21 @@ export class SessionManager {
     }
   }
 
+  private async installMouseCursorOverlay(): Promise<void> {
+    if (!this.context || !this.page || this.page.isClosed()) {
+      return;
+    }
+    try {
+      await this.context.addInitScript({ content: CURSOR_OVERLAY_INIT_SCRIPT });
+      await this.page.evaluate((script) => {
+        const run = new Function(script);
+        run();
+      }, CURSOR_OVERLAY_INIT_SCRIPT);
+    } catch (error) {
+      log.warn("Failed to install cursor overlay.", error);
+    }
+  }
+
   private async resetAllRuntime(): Promise<void> {
     this.clearCaptureTimer();
     this.detachCaptureListeners();
@@ -1060,9 +1299,11 @@ export class SessionManager {
     this.events = [];
     this.eventById.clear();
     this.screenshotPathById.clear();
+    this.screenshotThumbnailPathById.clear();
     this.lastScreenshotEvent = null;
     this.requestUrlById.clear();
     this.responseByRequestId.clear();
+    this.thumbnailWritesByPath.clear();
     this.sessionRoot = null;
     this.containsBodies = false;
     this.screenshotRun = null;
@@ -1203,6 +1444,14 @@ export class SessionManager {
     for (const event of events) {
       if (event.kind === "screenshot") {
         assets.add(event.path);
+        const fullPath = this.screenshotPathById.get(event.screenshotId);
+        const thumbnailPath = this.screenshotThumbnailPathById.get(event.screenshotId);
+        if (fullPath && thumbnailPath) {
+          const thumbnailRel = this.toSessionRelativePath(thumbnailPath);
+          if (thumbnailRel) {
+            assets.add(thumbnailRel);
+          }
+        }
       }
       if (event.kind === "network_response" && event.bodyPath) {
         assets.add(event.bodyPath);

@@ -133,7 +133,9 @@ export interface ScreenshotPayload {
   screenshotId: string;
   path: string;
   mimeType: string;
-  dataUrl: string;
+  dataUrl?: string;
+  url?: string;
+  variant?: "thumbnail" | "full";
 }
 
 export interface NetworkBodyPayload {

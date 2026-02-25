@@ -1,10 +1,11 @@
-import type { CaptureEvent } from "../../shared/types";
+import type { CaptureEvent, ScreenshotPayload } from "../../shared/types";
 import { eventTypeLabel, formatClock, formatRelMs } from "../view-model/eventSummaries";
 import type { FilmstripFrameViewModel } from "../view-model/types";
 
 interface PreviewPanelProps {
   selectedEvent: CaptureEvent | null;
   currentFrame: FilmstripFrameViewModel | null;
+  currentFramePayload: ScreenshotPayload | null;
   liveScreenshotSyncEnabled: boolean;
   onToggleLiveScreenshotSync: (enabled: boolean) => void;
   toggleDisabled?: boolean;
@@ -13,6 +14,7 @@ interface PreviewPanelProps {
 export function PreviewPanel({
   selectedEvent,
   currentFrame,
+  currentFramePayload,
   liveScreenshotSyncEnabled,
   onToggleLiveScreenshotSync,
   toggleDisabled = false
@@ -45,8 +47,10 @@ export function PreviewPanel({
       <div className="preview-main-shot">
         {!selectedEvent ? (
           <div className="preview-empty">No event selected</div>
+        ) : currentFramePayload ? (
+          <img src={currentFramePayload.url ?? currentFramePayload.dataUrl} alt={currentFramePayload.path} />
         ) : currentFrame?.payload ? (
-          <img src={currentFrame.payload.dataUrl} alt={currentFrame.payload.path} />
+          <img src={currentFrame.payload.url ?? currentFrame.payload.dataUrl} alt={currentFrame.payload.path} />
         ) : (
           <div className="preview-empty">No screenshots captured</div>
         )}
