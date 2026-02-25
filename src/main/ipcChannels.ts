@@ -9,6 +9,7 @@ export const IPC_CHANNELS = {
   getTimeline: "session.getTimeline",
   getEvent: "session.getEvent",
   getScreenshot: "session.getScreenshot",
+  getNetworkBody: "session.getNetworkBody",
   getStatus: "session.getStatus",
   getSettings: "session.getSettings",
   updateSettings: "session.updateSettings",

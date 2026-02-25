@@ -114,6 +114,7 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(IPC_CHANNELS.getTimeline);
   ipcMain.removeHandler(IPC_CHANNELS.getEvent);
   ipcMain.removeHandler(IPC_CHANNELS.getScreenshot);
+  ipcMain.removeHandler(IPC_CHANNELS.getNetworkBody);
   ipcMain.removeHandler(IPC_CHANNELS.getStatus);
   ipcMain.removeHandler(IPC_CHANNELS.getSettings);
   ipcMain.removeHandler(IPC_CHANNELS.updateSettings);
@@ -143,6 +144,9 @@ function registerIpcHandlers(): void {
   );
   ipcMain.handle(IPC_CHANNELS.getScreenshot, async (_event, screenshotId: string) =>
     requireSessionManager().getScreenshot(screenshotId)
+  );
+  ipcMain.handle(IPC_CHANNELS.getNetworkBody, async (_event, bodyPath: string) =>
+    requireSessionManager().getNetworkBody(bodyPath)
   );
   ipcMain.handle(IPC_CHANNELS.getStatus, async () => requireSessionManager().getStatus());
   ipcMain.handle(IPC_CHANNELS.getSettings, async () => requireSettingsStore().get());

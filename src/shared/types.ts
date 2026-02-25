@@ -136,6 +136,14 @@ export interface ScreenshotPayload {
   dataUrl: string;
 }
 
+export interface NetworkBodyPayload {
+  bodyPath: string;
+  sizeBytes: number;
+  text?: string;
+  base64?: string;
+  truncated?: boolean;
+}
+
 export interface AppSettings {
   startUrls: string[];
   defaultStartUrl: string;

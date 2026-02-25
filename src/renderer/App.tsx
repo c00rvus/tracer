@@ -136,6 +136,7 @@ export function App(): JSX.Element {
     typeof window.tracer.session.resumeCapture === "function";
 
   const loadingScreenshotIdsRef = useRef<Set<string>>(new Set());
+  const missingScreenshotIdsRef = useRef<Set<string>>(new Set());
   const dismissedStatusErrorRef = useRef<string | null>(null);
   const longCaptureWarningStateRef = useRef<{ key: string | null; lastReminderSlot: number }>({
     key: null,
@@ -252,6 +253,7 @@ export function App(): JSX.Element {
   useEffect(() => {
     setScreenshotById({});
     loadingScreenshotIdsRef.current.clear();
+    missingScreenshotIdsRef.current.clear();
   }, [status.sessionId]);
 
   const sortedTimeline = useMemo(() => sortTimeline(timeline), [timeline]);
@@ -302,6 +304,10 @@ export function App(): JSX.Element {
 
     const missing = screenshotEvents.filter((event) => {
       if (screenshotById[event.screenshotId]) {
+        missingScreenshotIdsRef.current.delete(event.screenshotId);
+        return false;
+      }
+      if (missingScreenshotIdsRef.current.has(event.screenshotId)) {
         return false;
       }
       return !loadingScreenshotIdsRef.current.has(event.screenshotId);
@@ -318,7 +324,17 @@ export function App(): JSX.Element {
 
     void Promise.all(
       missing.map(async (event) => {
-        const payload = await window.tracer.session.getScreenshot(event.screenshotId);
+        let payload: ScreenshotPayload | null = null;
+        try {
+          payload = await window.tracer.session.getScreenshot(event.screenshotId);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+          if (!message.includes("enoent")) {
+            throw error;
+          }
+          payload = null;
+        }
         return {
           screenshotId: event.screenshotId,
           payload
@@ -334,6 +350,9 @@ export function App(): JSX.Element {
           for (const result of results) {
             if (result.payload) {
               next[result.screenshotId] = result.payload;
+              missingScreenshotIdsRef.current.delete(result.screenshotId);
+            } else {
+              missingScreenshotIdsRef.current.add(result.screenshotId);
             }
           }
           return next;

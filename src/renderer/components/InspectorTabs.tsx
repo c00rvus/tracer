@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CaptureEvent } from "../../shared/types";
+import type { CaptureEvent, NetworkBodyPayload } from "../../shared/types";
 import { ResizableSplit } from "./ResizableSplit";
 import { eventTitle, formatRelMs } from "../view-model/eventSummaries";
 
@@ -126,6 +126,29 @@ function tryFormatPayload(rawPayload?: string): string {
   } catch {
     return rawPayload;
   }
+}
+
+function tryParseJson(value: string): unknown | null {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function formatResponseBodyText(body: NetworkBodyPayload | null | undefined): string {
+  if (!body) {
+    return "Response body not captured";
+  }
+  if (body.text !== undefined) {
+    const parsed = tryParseJson(body.text);
+    const formatted = parsed !== null ? JSON.stringify(parsed, null, 2) : body.text;
+    return body.truncated ? `${formatted}\n\n[truncated]` : formatted;
+  }
+  if (body.base64) {
+    return `Binary body captured (${body.sizeBytes} bytes).`;
+  }
+  return "Response body not captured";
 }
 
 function toKeyValueRows(headers?: Record<string, string>, emptyLabel = "No headers"): JSX.Element {
@@ -389,6 +412,8 @@ function NetworkInspector({
   onSelectRequest: (requestId: string) => void;
 }): JSX.Element {
   const [activeDetailTab, setActiveDetailTab] = useState<NetworkDetailTab>("headers");
+  const [bodyByPath, setBodyByPath] = useState<Record<string, NetworkBodyPayload | null>>({});
+  const [bodyErrorByPath, setBodyErrorByPath] = useState<Record<string, string>>({});
   const selectedRowRef = useRef<HTMLButtonElement | null>(null);
   const selectedEntry = entries.find((entry) => entry.requestId === selectedRequestId) ?? entries[0] ?? null;
   const requestEvent = selectedEntry?.events.find((event) => event.kind === "network_request");
@@ -404,6 +429,12 @@ function NetworkInspector({
   const initiatedRelMs = requestEvent?.tRelMs ?? selectedEntry?.events[0]?.tRelMs;
   const responseRelMs = responseEvent?.tRelMs;
   const finishedRelMs = selectedEntry?.events[selectedEntry.events.length - 1]?.tRelMs;
+  const selectedBodyPath = selectedEntry?.bodyPath ?? null;
+  const selectedBody = selectedBodyPath ? bodyByPath[selectedBodyPath] : null;
+  const selectedBodyError = selectedBodyPath ? bodyErrorByPath[selectedBodyPath] : undefined;
+  const isLoadingSelectedBody = selectedBodyPath
+    ? !(selectedBodyPath in bodyByPath) && !(selectedBodyPath in bodyErrorByPath)
+    : false;
 
   useEffect(() => {
     if (!selectedRequestId && entries[0]) {
@@ -424,6 +455,41 @@ function NetworkInspector({
       block: "nearest"
     });
   }, [selectedEntry?.requestId]);
+
+  useEffect(() => {
+    if (!selectedBodyPath) {
+      return;
+    }
+    if (selectedBodyPath in bodyByPath || selectedBodyPath in bodyErrorByPath) {
+      return;
+    }
+
+    let cancelled = false;
+    void window.tracer.session
+      .getNetworkBody(selectedBodyPath)
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setBodyByPath((current) => ({
+          ...current,
+          [selectedBodyPath]: payload
+        }));
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setBodyErrorByPath((current) => ({
+          ...current,
+          [selectedBodyPath]: error instanceof Error ? error.message : "Failed to load response body."
+        }));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bodyByPath, bodyErrorByPath, selectedBodyPath]);
 
   if (entries.length === 0) {
     return <div className="empty-state">No network requests available.</div>;
@@ -509,17 +575,19 @@ function NetworkInspector({
                 {activeDetailTab === "preview" && (
                   <div className="network-tab-panel">
                     <h4>Preview</h4>
-                    {selectedEntry.bodyPath ? (
-                      <>
-                        <p className="network-note">
-                          Response body file captured. Use the saved path below to inspect the content.
-                        </p>
-                        <pre>{selectedEntry.bodyPath}</pre>
-                      </>
-                    ) : (
+                    {!selectedEntry.bodyPath && (
                       <p className="network-note">
                         No inline preview available. This request did not persist a response body.
                       </p>
+                    )}
+                    {selectedEntry.bodyPath && isLoadingSelectedBody && (
+                      <p className="network-note">Loading response body...</p>
+                    )}
+                    {selectedEntry.bodyPath && selectedBodyError && (
+                      <p className="network-note">{selectedBodyError}</p>
+                    )}
+                    {selectedEntry.bodyPath && !isLoadingSelectedBody && !selectedBodyError && (
+                      <pre>{formatResponseBodyText(selectedBody)}</pre>
                     )}
 
                     <h4>Detected Content Type</h4>
@@ -533,7 +601,12 @@ function NetworkInspector({
                     <pre>{statusLabel}</pre>
 
                     <h4>Response Body</h4>
-                    <pre>{selectedEntry.bodyPath ? `Saved at: ${selectedEntry.bodyPath}` : "Response body not captured"}</pre>
+                    {!selectedEntry.bodyPath && <pre>Response body not captured</pre>}
+                    {selectedEntry.bodyPath && isLoadingSelectedBody && <pre>Loading response body...</pre>}
+                    {selectedEntry.bodyPath && selectedBodyError && <pre>{selectedBodyError}</pre>}
+                    {selectedEntry.bodyPath && !isLoadingSelectedBody && !selectedBodyError && (
+                      <pre>{formatResponseBodyText(selectedBody)}</pre>
+                    )}
 
                     {selectedEntry.errorText && (
                       <>

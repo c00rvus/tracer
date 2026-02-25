@@ -15,6 +15,7 @@ const api: TracerApi = {
     getTimeline: (sessionId: string) => ipcRenderer.invoke(IPC_CHANNELS.getTimeline, sessionId),
     getEvent: (eventId: string) => ipcRenderer.invoke(IPC_CHANNELS.getEvent, eventId),
     getScreenshot: (screenshotId: string) => ipcRenderer.invoke(IPC_CHANNELS.getScreenshot, screenshotId),
+    getNetworkBody: (bodyPath: string) => ipcRenderer.invoke(IPC_CHANNELS.getNetworkBody, bodyPath),
     getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getStatus),
     getSettings: () => ipcRenderer.invoke(IPC_CHANNELS.getSettings),
     updateSettings: (settings) => ipcRenderer.invoke(IPC_CHANNELS.updateSettings, settings),

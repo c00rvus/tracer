@@ -16,6 +16,7 @@ import type {
   ConsoleEvent,
   LifecycleEvent,
   NetworkFailEvent,
+  NetworkBodyPayload,
   NetworkRequestEvent,
   NetworkResponseEvent,
   SaveSessionOptions,
@@ -32,7 +33,8 @@ import {
   ensureDir,
   parseEventsNdjsonFile,
   sanitizeFileFragment,
-  serializeEventLine
+  serializeEventLine,
+  toPosixPath
 } from "./utils";
 import { createSessionArchive, extractSessionArchive } from "./archive";
 
@@ -411,7 +413,19 @@ export class SessionManager {
     if (!imagePath) {
       return null;
     }
-    const data = await readFile(imagePath);
+    let data: Buffer;
+    try {
+      data = await readFile(imagePath);
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? String((error as { code?: string }).code)
+          : "";
+      if (code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
     const relPath = this.toSessionRelativePath(imagePath);
     return {
       screenshotId,
@@ -419,6 +433,43 @@ export class SessionManager {
       mimeType: "image/png",
       dataUrl: `data:image/png;base64,${data.toString("base64")}`
     };
+  }
+
+  public async getNetworkBody(bodyPath: string): Promise<NetworkBodyPayload | null> {
+    if (!this.sessionRoot) {
+      return null;
+    }
+    const relativePath = this.toSafeRelativePath(bodyPath);
+    if (!relativePath) {
+      return null;
+    }
+
+    const absolutePath = path.join(this.sessionRoot, relativePath);
+    let data: Buffer;
+    try {
+      data = await readFile(absolutePath);
+    } catch {
+      return null;
+    }
+
+    const maxTextBytes = 2 * 1024 * 1024;
+    const payload: NetworkBodyPayload = {
+      bodyPath: toPosixPath(relativePath),
+      sizeBytes: data.length
+    };
+
+    if (this.isLikelyTextBody(data)) {
+      const truncated = data.length > maxTextBytes;
+      const slice = truncated ? data.subarray(0, maxTextBytes) : data;
+      payload.text = slice.toString("utf8");
+      if (truncated) {
+        payload.truncated = true;
+      }
+      return payload;
+    }
+
+    payload.base64 = data.toString("base64");
+    return payload;
   }
 
   public async dispose(): Promise<void> {
@@ -665,17 +716,24 @@ export class SessionManager {
       mimeType?: string;
     };
   }): void {
-    if (!this.isCapturing()) {
+    const timelineCaptureStartAtMs = this.getTimelineCaptureStartAtMs();
+    if (!this.isCapturing() || !this.status.sessionId || timelineCaptureStartAtMs === null) {
       return;
     }
-    this.responseByRequestId.set(params.requestId, {
+
+    const response: PendingResponse = {
       requestId: params.requestId,
       url: params.response.url,
       status: params.response.status,
       statusText: params.response.statusText,
       headers: params.response.headers ?? {},
       mimeType: params.response.mimeType
-    });
+    };
+    this.responseByRequestId.set(params.requestId, response);
+
+    // Emit response metadata immediately so inspector tabs can show status/headers
+    // even if body capture on loadingFinished is unavailable.
+    this.appendNetworkResponseEvent(response, timelineCaptureStartAtMs);
   }
 
   private async handleLoadingFinished(params: { requestId: string }): Promise<void> {
@@ -713,24 +771,12 @@ export class SessionManager {
       }
     }
 
-    const base = createBaseEvent({
-      sessionId: this.status.sessionId,
-      captureStartAtMs: timelineCaptureStartAtMs,
-      kind: "network_response",
-      pageUrl: this.page?.url()
-    });
-    const event: NetworkResponseEvent = {
-      ...base,
-      kind: "network_response",
-      requestId: response.requestId,
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-      mimeType: response.mimeType,
-      bodyPath
-    };
-    this.appendEvent(event);
+    if (bodyPath) {
+      // Emit an enrichment response event that includes persisted body path.
+      this.appendNetworkResponseEvent(response, timelineCaptureStartAtMs, bodyPath);
+    }
     this.responseByRequestId.delete(params.requestId);
+    this.requestUrlById.delete(params.requestId);
   }
 
   private async handleLoadingFailed(params: {
@@ -764,6 +810,33 @@ export class SessionManager {
     if (this.captureSettings.screenshotOnNetworkFail) {
       await this.captureScreenshot("network-fail");
     }
+  }
+
+  private appendNetworkResponseEvent(
+    response: PendingResponse,
+    timelineCaptureStartAtMs: number,
+    bodyPath?: string
+  ): void {
+    if (!this.status.sessionId) {
+      return;
+    }
+    const base = createBaseEvent({
+      sessionId: this.status.sessionId,
+      captureStartAtMs: timelineCaptureStartAtMs,
+      kind: "network_response",
+      pageUrl: this.page?.url()
+    });
+    const event: NetworkResponseEvent = {
+      ...base,
+      kind: "network_response",
+      requestId: response.requestId,
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+      mimeType: response.mimeType,
+      bodyPath
+    };
+    this.appendEvent(event);
   }
 
   private async captureScreenshot(
@@ -1216,6 +1289,25 @@ export class SessionManager {
     return normalized;
   }
 
+  private isLikelyTextBody(data: Buffer): boolean {
+    if (data.length === 0) {
+      return true;
+    }
+    const sampleSize = Math.min(data.length, 2048);
+    let suspiciousCount = 0;
+    for (let index = 0; index < sampleSize; index += 1) {
+      const code = data[index];
+      const isTab = code === 9;
+      const isNewLine = code === 10 || code === 13;
+      const isPrintableAscii = code >= 32 && code <= 126;
+      if (isTab || isNewLine || isPrintableAscii) {
+        continue;
+      }
+      suspiciousCount += 1;
+    }
+    return suspiciousCount / sampleSize < 0.2;
+  }
+
   private async pruneOldAutoSaves(directoryPath: string, keepCount: number): Promise<void> {
     const entries = await readdir(directoryPath, { withFileTypes: true });
     const files = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".zip"));
@@ -1282,7 +1374,7 @@ export class SessionManager {
     if (!this.sessionRoot) {
       return filePath;
     }
-    return path.relative(this.sessionRoot, filePath).split(path.sep).join("/");
+    return toPosixPath(path.relative(this.sessionRoot, filePath));
   }
 
   private buildArchiveFileName(suffix = ""): string {

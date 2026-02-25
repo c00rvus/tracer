@@ -1,6 +1,7 @@
 import type {
   AppSettings,
   CaptureEvent,
+  NetworkBodyPayload,
   SaveSessionOptions,
   SavedSessionResult,
   ScreenshotPayload,
@@ -18,6 +19,7 @@ export interface SessionApi {
   getTimeline(sessionId: string): Promise<CaptureEvent[]>;
   getEvent(eventId: string): Promise<CaptureEvent | null>;
   getScreenshot(screenshotId: string): Promise<ScreenshotPayload | null>;
+  getNetworkBody(bodyPath: string): Promise<NetworkBodyPayload | null>;
   getStatus(): Promise<SessionStatus>;
   getSettings(): Promise<AppSettings>;
   updateSettings(settings: AppSettings): Promise<AppSettings>;
