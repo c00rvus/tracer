@@ -4,3 +4,4 @@ release
 .tmp
 .playwright
 *.log
+.DS_Store
