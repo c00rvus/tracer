@@ -21,6 +21,13 @@ mac:
   target:
     - dmg
     - zip
+linux:
+  icon: build/icon.png
+  category: Development
+  target:
+    - AppImage
+    - deb
+    - tar.gz
 nsis:
   oneClick: false
   perMachine: false

@@ -18,6 +18,7 @@
     "build:renderer": "vite build",
     "build:main": "tsup src/main/main.ts src/main/preload.ts --format cjs --out-dir dist/main --sourcemap --external electron",
     "dist:mac": "npm run generate:icons && cross-env PLAYWRIGHT_BROWSERS_PATH=0 npm run build && cross-env PLAYWRIGHT_BROWSERS_PATH=0 electron-builder --config electron-builder.yml --mac dmg zip",
+    "dist:linux": "npm run generate:icons && cross-env PLAYWRIGHT_BROWSERS_PATH=0 npm run build && cross-env PLAYWRIGHT_BROWSERS_PATH=0 electron-builder --config electron-builder.yml --linux AppImage deb tar.gz",
     "dist:installer": "npm run generate:icons && cross-env PLAYWRIGHT_BROWSERS_PATH=0 npm run build && cross-env PLAYWRIGHT_BROWSERS_PATH=0 electron-builder --config electron-builder.yml --win nsis",
     "dist:portable": "npm run generate:icons && cross-env PLAYWRIGHT_BROWSERS_PATH=0 npm run build && cross-env PLAYWRIGHT_BROWSERS_PATH=0 electron-builder --config electron-builder.yml --win portable",
     "update:installed": "node scripts/run-update-installer.cjs",

@@ -271,7 +271,7 @@ export class SessionManager {
   }
 
   private isScreencastCapturePlatform(): boolean {
-    return process.platform === "win32" || process.platform === "darwin";
+    return process.platform === "win32" || process.platform === "darwin" || process.platform === "linux";
   }
 
   private readonly pageCloseHandler = (): void => {
