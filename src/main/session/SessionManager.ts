@@ -72,6 +72,11 @@ const TRACER_MEDIA_PROTOCOL_SCHEME = "tracer-media";
 const MAC_SCROLL_CAPTURE_COOLDOWN_MS = 220;
 const MAC_TIMER_JPEG_QUALITY = 62;
 const MAC_EVENT_JPEG_QUALITY = 72;
+const WINDOWS_SCREENCAST_MAX_WIDTH = 1280;
+const WINDOWS_SCREENCAST_MAX_HEIGHT = 720;
+const WINDOWS_SCREENCAST_QUALITY = 80;
+const WINDOWS_SCREENCAST_FRAME_WAIT_MS = 380;
+const WINDOWS_SCREENCAST_FIRST_FRAME_WAIT_MS = 900;
 const CURSOR_OVERLAY_INIT_SCRIPT = `
 (() => {
   const globalState = globalThis;
@@ -211,6 +216,13 @@ interface ScreenshotEncoding {
   quality?: number;
 }
 
+interface WindowsScreencastFrame {
+  buffer: Buffer;
+  width: number;
+  height: number;
+  frameSwapWallTimeMs: number;
+}
+
 async function loadPlaywright(): Promise<PlaywrightModule> {
   process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH ?? "0";
   if (!playwrightModulePromise) {
@@ -237,6 +249,8 @@ export class SessionManager {
   private lastScreenshotEvent: ScreenshotEvent | null = null;
   private screenshotRun: Promise<void> | null = null;
   private thumbnailWritesByPath = new Map<string, Promise<void>>();
+  private windowsScreencastActive = false;
+  private latestWindowsScreencastFrame: WindowsScreencastFrame | null = null;
 
   private responseByRequestId = new Map<string, PendingResponse>();
   private requestUrlById = new Map<string, string>();
@@ -315,6 +329,18 @@ export class SessionManager {
     void this.handleLoadingFailed(params);
   };
 
+  private readonly screencastFrameHandler = (params: {
+    data: string;
+    sessionId: number;
+    metadata?: {
+      timestamp?: number;
+      deviceWidth?: number;
+      deviceHeight?: number;
+    };
+  }): void => {
+    this.handleWindowsScreencastFrame(params);
+  };
+
   public getStatus(): SessionStatus {
     return this.cloneStatus();
   }
@@ -380,6 +406,7 @@ export class SessionManager {
       });
 
       this.attachCaptureListeners();
+      await this.startWindowsScreencastIfNeeded();
       this.emitLifecycleEvent("capture_started");
       this.startScreenshotTimer();
 
@@ -398,6 +425,7 @@ export class SessionManager {
       }
 
       this.clearCaptureTimer();
+      await this.stopWindowsScreencastIfNeeded();
       this.detachCaptureListeners();
       this.emitLifecycleEvent("capture_paused");
       this.pausedStartedAtMs = Date.now();
@@ -429,6 +457,7 @@ export class SessionManager {
       this.status.captureEndedAt = null;
       this.status.state = "capturing";
       this.attachCaptureListeners();
+      await this.startWindowsScreencastIfNeeded();
       this.startScreenshotTimer();
       this.emitLifecycleEvent("capture_resumed");
       return this.cloneStatus();
@@ -727,6 +756,8 @@ export class SessionManager {
     this.requestUrlById.clear();
     this.responseByRequestId.clear();
     this.containsBodies = false;
+    this.windowsScreencastActive = false;
+    this.latestWindowsScreencastFrame = null;
 
     this.status = {
       state: "idle",
@@ -758,6 +789,7 @@ export class SessionManager {
     }
 
     this.clearCaptureTimer();
+    await this.stopWindowsScreencastIfNeeded();
     this.detachCaptureListeners();
     await this.waitForOngoingScreenshot();
 
@@ -792,6 +824,9 @@ export class SessionManager {
     this.cdp.on("Network.responseReceived", this.responseReceivedHandler);
     this.cdp.on("Network.loadingFinished", this.loadingFinishedHandler);
     this.cdp.on("Network.loadingFailed", this.loadingFailedHandler);
+    if (process.platform === "win32") {
+      this.cdp.on("Page.screencastFrame", this.screencastFrameHandler);
+    }
 
     this.listenersAttached = true;
   }
@@ -811,6 +846,9 @@ export class SessionManager {
       this.cdp.off("Network.responseReceived", this.responseReceivedHandler);
       this.cdp.off("Network.loadingFinished", this.loadingFinishedHandler);
       this.cdp.off("Network.loadingFailed", this.loadingFailedHandler);
+      if (process.platform === "win32") {
+        this.cdp.off("Page.screencastFrame", this.screencastFrameHandler);
+      }
     }
     this.listenersAttached = false;
   }
@@ -1077,9 +1115,201 @@ export class SessionManager {
     this.appendEvent(event);
   }
 
+  private async startWindowsScreencastIfNeeded(): Promise<void> {
+    if (process.platform !== "win32" || !this.cdp || this.windowsScreencastActive) {
+      return;
+    }
+    try {
+      await this.cdp.send("Page.startScreencast", {
+        format: "jpeg",
+        quality: WINDOWS_SCREENCAST_QUALITY,
+        maxWidth: WINDOWS_SCREENCAST_MAX_WIDTH,
+        maxHeight: WINDOWS_SCREENCAST_MAX_HEIGHT,
+        everyNthFrame: 1
+      });
+      this.windowsScreencastActive = true;
+    } catch (error) {
+      this.windowsScreencastActive = false;
+      log.warn("Failed to start Windows screencast capture. Falling back to page screenshots.", error);
+    }
+  }
+
+  private async stopWindowsScreencastIfNeeded(): Promise<void> {
+    if (process.platform !== "win32") {
+      return;
+    }
+
+    this.latestWindowsScreencastFrame = null;
+    if (!this.cdp || !this.windowsScreencastActive) {
+      this.windowsScreencastActive = false;
+      return;
+    }
+
+    try {
+      await this.cdp.send("Page.stopScreencast");
+    } catch {
+      // ignore stop errors during teardown
+    } finally {
+      this.windowsScreencastActive = false;
+    }
+  }
+
+  private handleWindowsScreencastFrame(params: {
+    data: string;
+    sessionId: number;
+    metadata?: {
+      timestamp?: number;
+      deviceWidth?: number;
+      deviceHeight?: number;
+    };
+  }): void {
+    const cdp = this.cdp;
+    if (cdp) {
+      void cdp.send("Page.screencastFrameAck", { sessionId: params.sessionId }).catch(() => {
+        // ignore ack errors for disposed sessions
+      });
+    }
+
+    if (process.platform !== "win32" || !this.isCapturing()) {
+      return;
+    }
+
+    try {
+      const buffer = Buffer.from(params.data, "base64");
+      if (buffer.length === 0) {
+        return;
+      }
+      const width = params.metadata?.deviceWidth ?? 0;
+      const height = params.metadata?.deviceHeight ?? 0;
+      const frameSwapWallTimeMs = params.metadata?.timestamp
+        ? Math.round(params.metadata.timestamp * 1000)
+        : Date.now();
+      this.latestWindowsScreencastFrame = {
+        buffer,
+        width,
+        height,
+        frameSwapWallTimeMs
+      };
+    } catch {
+      // ignore malformed frame payloads
+    }
+  }
+
+  private getLatestWindowsScreencastFrame(): WindowsScreencastFrame | null {
+    const frame = this.latestWindowsScreencastFrame;
+    if (!frame || frame.buffer.length === 0) {
+      return null;
+    }
+    return frame;
+  }
+
+  private async waitForWindowsScreencastFrame(
+    waitMs: number
+  ): Promise<WindowsScreencastFrame | null> {
+    let frame = this.getLatestWindowsScreencastFrame();
+    if (frame || waitMs <= 0 || !this.windowsScreencastActive) {
+      return frame;
+    }
+
+    const deadlineAt = Date.now() + waitMs;
+    while (!frame && this.windowsScreencastActive && this.isCapturing() && Date.now() < deadlineAt) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 40));
+      frame = this.getLatestWindowsScreencastFrame();
+    }
+    return frame;
+  }
+
+  private resolveWindowsScreencastWaitMs(reason: ScreenshotEvent["reason"]): number {
+    if (process.platform !== "win32" || !this.windowsScreencastActive) {
+      return 0;
+    }
+    if (this.getLatestWindowsScreencastFrame()) {
+      return 0;
+    }
+    return reason === "manual-start"
+      ? WINDOWS_SCREENCAST_FIRST_FRAME_WAIT_MS
+      : WINDOWS_SCREENCAST_FRAME_WAIT_MS;
+  }
+
+  private async captureScreenshotFromWindowsScreencast(
+    reason: ScreenshotEvent["reason"],
+    waitForFrameMs = 0
+  ): Promise<boolean> {
+    if (process.platform !== "win32" || !this.isCapturing() || !this.sessionRoot || !this.status.sessionId) {
+      return false;
+    }
+
+    const frame = await this.waitForWindowsScreencastFrame(waitForFrameMs);
+    if (!frame || frame.buffer.length === 0) {
+      return false;
+    }
+
+    const timelineCaptureStartAtMs = this.getTimelineCaptureStartAtMs();
+    if (timelineCaptureStartAtMs === null) {
+      return false;
+    }
+
+    const screenshotId = randomUUID();
+    const relativePath = path.join(
+      "screenshots",
+      `${Date.now()}-${sanitizeFileFragment(screenshotId.slice(0, 8))}.jpg`
+    );
+    const absolutePath = path.join(this.sessionRoot, relativePath);
+
+    try {
+      await ensureDir(path.dirname(absolutePath));
+      await writeFile(absolutePath, frame.buffer);
+    } catch {
+      return false;
+    }
+
+    const viewport = this.page?.viewportSize();
+    const width = frame.width || viewport?.width || 0;
+    const height = frame.height || viewport?.height || 0;
+
+    const base = createBaseEvent({
+      sessionId: this.status.sessionId,
+      captureStartAtMs: timelineCaptureStartAtMs,
+      kind: "screenshot",
+      pageUrl: this.page?.url()
+    });
+
+    const event: ScreenshotEvent = {
+      ...base,
+      kind: "screenshot",
+      screenshotId,
+      path: relativePath.split(path.sep).join("/"),
+      width,
+      height,
+      reason
+    };
+
+    this.appendEvent(event);
+    void this.ensureThumbnailForScreenshot(screenshotId).catch((error) => {
+      log.warn("Failed to pre-generate screenshot thumbnail.", error);
+    });
+    return true;
+  }
+
   private async captureScreenshot(
     reason: ScreenshotEvent["reason"]
   ): Promise<void> {
+    if (process.platform === "win32") {
+      await this.startWindowsScreencastIfNeeded();
+      const waitForFrameMs = this.resolveWindowsScreencastWaitMs(reason);
+      const capturedFromScreencast = await this.captureScreenshotFromWindowsScreencast(
+        reason,
+        waitForFrameMs
+      );
+      if (capturedFromScreencast) {
+        return;
+      }
+      if (this.windowsScreencastActive) {
+        this.appendFallbackScreenshotFromLast(reason);
+        return;
+      }
+    }
+
     if (process.platform === "darwin" && reason === "timer") {
       const scrollingNow = await this.isMacScrollActive();
       if (scrollingNow) {
@@ -1174,9 +1404,16 @@ export class SessionManager {
     reason: ScreenshotEvent["reason"],
     encoding: ScreenshotEncoding
   ): Promise<void> {
+    const isTimerCapture = reason === "timer";
+    const isWindows = process.platform === "win32";
+    const skipFullPageForPlatformTimer =
+      isTimerCapture && (process.platform === "darwin" || isWindows);
+    const skipFullPageOnWindows = isWindows;
+
     const useFullPageFirstAttempt =
       this.captureSettings.fullPageScreenshots &&
-      !(process.platform === "darwin" && reason === "timer");
+      !skipFullPageForPlatformTimer &&
+      !skipFullPageOnWindows;
 
     const attempts = useFullPageFirstAttempt
       ? [
@@ -1385,6 +1622,8 @@ export class SessionManager {
     this.thumbnailWritesByPath.clear();
     this.sessionRoot = null;
     this.containsBodies = false;
+    this.windowsScreencastActive = false;
+    this.latestWindowsScreencastFrame = null;
     this.screenshotRun = null;
     this.pausedStartedAtMs = null;
     this.pausedAccumulatedMs = 0;
