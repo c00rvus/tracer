@@ -1,6 +1,13 @@
 import { useEffect, useRef } from "react";
 import { formatRelMs } from "../view-model/eventSummaries";
-import { ACTION_FILTER_OPTIONS, type ActionFilterKind } from "../view-model/timelineMapping";
+import {
+  ACTION_FILTER_OPTIONS,
+  ACTION_HTTP_METHOD_FILTER_OPTIONS,
+  CONSOLE_LEVEL_FILTER_OPTIONS,
+  type ActionFilterKind,
+  type ActionHttpMethodFilter,
+  type ConsoleLevelFilter
+} from "../view-model/timelineMapping";
 import type { EventRowViewModel } from "../view-model/types";
 
 interface ActionsPanelProps {
@@ -8,11 +15,37 @@ interface ActionsPanelProps {
   selectedEventId: string | null;
   search: string;
   selectedKinds: ActionFilterKind[];
+  searchCaseSensitive: boolean;
+  regexSearchEnabled: boolean;
+  urlFilter: string;
+  requestIdFilter: string;
+  methodFilter: ActionHttpMethodFilter;
+  statusMinFilter: string;
+  statusMaxFilter: string;
+  timeStartSecFilter: string;
+  timeEndSecFilter: string;
+  hideStaticAssets: boolean;
+  onlyErrorsFilter: boolean;
+  consoleLevelFilters: ConsoleLevelFilter[];
   liveHoverSyncEnabled: boolean;
   autoFollowLogs: boolean;
   onSearchChange: (value: string) => void;
   onToggleKindFilter: (kind: ActionFilterKind, selected: boolean) => void;
   onSetKindFilters: (kinds: ActionFilterKind[]) => void;
+  onSearchCaseSensitiveChange: (enabled: boolean) => void;
+  onRegexSearchChange: (enabled: boolean) => void;
+  onUrlFilterChange: (value: string) => void;
+  onRequestIdFilterChange: (value: string) => void;
+  onMethodFilterChange: (value: ActionHttpMethodFilter) => void;
+  onStatusMinFilterChange: (value: string) => void;
+  onStatusMaxFilterChange: (value: string) => void;
+  onTimeStartSecFilterChange: (value: string) => void;
+  onTimeEndSecFilterChange: (value: string) => void;
+  onHideStaticAssetsChange: (enabled: boolean) => void;
+  onOnlyErrorsFilterChange: (enabled: boolean) => void;
+  onToggleConsoleLevelFilter: (level: ConsoleLevelFilter, selected: boolean) => void;
+  onSetConsoleLevelFilters: (levels: ConsoleLevelFilter[]) => void;
+  onClearAdvancedFilters: () => void;
   onToggleLiveHoverSync: (enabled: boolean) => void;
   onSelectEvent: (eventId: string) => void;
   onHoverWindow: (hover: { startMs: number; durationMs: number } | null) => void;
@@ -23,11 +56,37 @@ export function ActionsPanel({
   selectedEventId,
   search,
   selectedKinds,
+  searchCaseSensitive,
+  regexSearchEnabled,
+  urlFilter,
+  requestIdFilter,
+  methodFilter,
+  statusMinFilter,
+  statusMaxFilter,
+  timeStartSecFilter,
+  timeEndSecFilter,
+  hideStaticAssets,
+  onlyErrorsFilter,
+  consoleLevelFilters,
   liveHoverSyncEnabled,
   autoFollowLogs,
   onSearchChange,
   onToggleKindFilter,
   onSetKindFilters,
+  onSearchCaseSensitiveChange,
+  onRegexSearchChange,
+  onUrlFilterChange,
+  onRequestIdFilterChange,
+  onMethodFilterChange,
+  onStatusMinFilterChange,
+  onStatusMaxFilterChange,
+  onTimeStartSecFilterChange,
+  onTimeEndSecFilterChange,
+  onHideStaticAssetsChange,
+  onOnlyErrorsFilterChange,
+  onToggleConsoleLevelFilter,
+  onSetConsoleLevelFilters,
+  onClearAdvancedFilters,
   onToggleLiveHoverSync,
   onSelectEvent,
   onHoverWindow
@@ -36,6 +95,7 @@ export function ActionsPanel({
   const selectAllRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const filterDropdownRef = useRef<HTMLDetailsElement | null>(null);
+  const advancedFilterDropdownRef = useRef<HTMLDetailsElement | null>(null);
   const prevRowsCountRef = useRef(0);
   const wasAutoFollowRef = useRef(false);
   const badgeClassFor = (badge: string): string => `row-badge-${badge.toLowerCase()}`;
@@ -47,6 +107,22 @@ export function ActionsPanel({
         ? "all"
         : selectedSummary.join(", ");
   const allSelected = selectedKinds.length === ACTION_FILTER_OPTIONS.length;
+  const allConsoleLevelsSelected = consoleLevelFilters.length === CONSOLE_LEVEL_FILTER_OPTIONS.length;
+  const advancedFiltersCount =
+    (searchCaseSensitive ? 1 : 0) +
+    (regexSearchEnabled ? 1 : 0) +
+    (urlFilter.trim() ? 1 : 0) +
+    (requestIdFilter.trim() ? 1 : 0) +
+    (methodFilter !== "all" ? 1 : 0) +
+    (statusMinFilter.trim() ? 1 : 0) +
+    (statusMaxFilter.trim() ? 1 : 0) +
+    (timeStartSecFilter.trim() ? 1 : 0) +
+    (timeEndSecFilter.trim() ? 1 : 0) +
+    (hideStaticAssets ? 1 : 0) +
+    (onlyErrorsFilter ? 1 : 0) +
+    (allConsoleLevelsSelected ? 0 : 1);
+  const advancedSummaryLabel =
+    advancedFiltersCount > 0 ? `Filters (${advancedFiltersCount})` : "Filters";
 
   useEffect(() => {
     if (!selectedRowRef.current) {
@@ -68,14 +144,22 @@ export function ActionsPanel({
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent): void => {
       const dropdown = filterDropdownRef.current;
-      if (!dropdown || !dropdown.open) {
-        return;
-      }
+      const advancedDropdown = advancedFilterDropdownRef.current;
       const target = event.target;
-      if (target instanceof Node && dropdown.contains(target)) {
-        return;
+
+      if (dropdown?.open) {
+        if (target instanceof Node && dropdown.contains(target)) {
+          return;
+        }
+        dropdown.open = false;
       }
-      dropdown.open = false;
+
+      if (advancedDropdown?.open) {
+        if (target instanceof Node && advancedDropdown.contains(target)) {
+          return;
+        }
+        advancedDropdown.open = false;
+      }
     };
 
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -85,6 +169,10 @@ export function ActionsPanel({
       const dropdown = filterDropdownRef.current;
       if (dropdown?.open) {
         dropdown.open = false;
+      }
+      const advancedDropdown = advancedFilterDropdownRef.current;
+      if (advancedDropdown?.open) {
+        advancedDropdown.open = false;
       }
     };
 
@@ -137,7 +225,7 @@ export function ActionsPanel({
           <input
             value={search}
             onChange={(event) => onSearchChange(event.target.value)}
-            placeholder="Search events..."
+            placeholder="Search events, text, URL..."
           />
           <details className="actions-filter-dropdown" ref={filterDropdownRef}>
             <summary className="actions-filter-summary">{summaryLabel}</summary>
@@ -171,6 +259,151 @@ export function ActionsPanel({
                   </label>
                 );
               })}
+            </div>
+          </details>
+          <details className="actions-filter-dropdown actions-filter-dropdown-advanced" ref={advancedFilterDropdownRef}>
+            <summary className="actions-filter-summary">{advancedSummaryLabel}</summary>
+            <div className="actions-filter-menu actions-advanced-filter-menu">
+              <div className="actions-advanced-grid">
+                <label className="actions-filter-field">
+                  <span>URL contains</span>
+                  <input
+                    value={urlFilter}
+                    onChange={(event) => onUrlFilterChange(event.target.value)}
+                    placeholder="api.example.com/path"
+                  />
+                </label>
+                <label className="actions-filter-field">
+                  <span>Request ID contains</span>
+                  <input
+                    value={requestIdFilter}
+                    onChange={(event) => onRequestIdFilterChange(event.target.value)}
+                    placeholder="29892.333"
+                  />
+                </label>
+                <label className="actions-filter-field">
+                  <span>Method</span>
+                  <select
+                    value={methodFilter}
+                    onChange={(event) =>
+                      onMethodFilterChange(event.target.value as ActionHttpMethodFilter)
+                    }
+                  >
+                    {ACTION_HTTP_METHOD_FILTER_OPTIONS.map((method) => (
+                      <option key={method} value={method}>
+                        {method === "all" ? "all methods" : method}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="actions-filter-field">
+                  <span>Status min</span>
+                  <input
+                    value={statusMinFilter}
+                    onChange={(event) => onStatusMinFilterChange(event.target.value)}
+                    placeholder="200"
+                    inputMode="numeric"
+                  />
+                </label>
+                <label className="actions-filter-field">
+                  <span>Status max</span>
+                  <input
+                    value={statusMaxFilter}
+                    onChange={(event) => onStatusMaxFilterChange(event.target.value)}
+                    placeholder="599"
+                    inputMode="numeric"
+                  />
+                </label>
+                <label className="actions-filter-field">
+                  <span>From (s)</span>
+                  <input
+                    value={timeStartSecFilter}
+                    onChange={(event) => onTimeStartSecFilterChange(event.target.value)}
+                    placeholder="0.0"
+                    inputMode="decimal"
+                  />
+                </label>
+                <label className="actions-filter-field">
+                  <span>To (s)</span>
+                  <input
+                    value={timeEndSecFilter}
+                    onChange={(event) => onTimeEndSecFilterChange(event.target.value)}
+                    placeholder="12.5"
+                    inputMode="decimal"
+                  />
+                </label>
+              </div>
+
+              <div className="actions-filter-toggles">
+                <label className="actions-check-option">
+                  <input
+                    type="checkbox"
+                    checked={onlyErrorsFilter}
+                    onChange={(event) => onOnlyErrorsFilterChange(event.target.checked)}
+                  />
+                  <span>Only errors</span>
+                </label>
+                <label className="actions-check-option">
+                  <input
+                    type="checkbox"
+                    checked={hideStaticAssets}
+                    onChange={(event) => onHideStaticAssetsChange(event.target.checked)}
+                  />
+                  <span>Hide static assets (image/css/js/font)</span>
+                </label>
+                <label className="actions-check-option">
+                  <input
+                    type="checkbox"
+                    checked={searchCaseSensitive}
+                    onChange={(event) => onSearchCaseSensitiveChange(event.target.checked)}
+                  />
+                  <span>Case sensitive search</span>
+                </label>
+                <label className="actions-check-option">
+                  <input
+                    type="checkbox"
+                    checked={regexSearchEnabled}
+                    onChange={(event) => onRegexSearchChange(event.target.checked)}
+                  />
+                  <span>Regex search</span>
+                </label>
+              </div>
+
+              <div className="actions-console-levels">
+                <span>Console levels</span>
+                <div className="actions-level-chip-row">
+                  {CONSOLE_LEVEL_FILTER_OPTIONS.map((level) => {
+                    const selected = consoleLevelFilters.includes(level);
+                    return (
+                      <button
+                        key={level}
+                        type="button"
+                        className={`actions-level-chip ${selected ? "active" : ""}`}
+                        onClick={() => onToggleConsoleLevelFilter(level, !selected)}
+                      >
+                        {level}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="actions-level-chip-actions">
+                  <button
+                    type="button"
+                    onClick={() => onSetConsoleLevelFilters(CONSOLE_LEVEL_FILTER_OPTIONS)}
+                  >
+                    All levels
+                  </button>
+                  <button type="button" onClick={() => onSetConsoleLevelFilters([])}>
+                    None
+                  </button>
+                </div>
+              </div>
+
+              <div className="actions-advanced-actions">
+                <button type="button" onClick={onClearAdvancedFilters}>
+                  Clear advanced filters
+                </button>
+              </div>
             </div>
           </details>
         </div>

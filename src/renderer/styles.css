@@ -454,13 +454,16 @@ button:disabled {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
+  position: relative;
 }
 
 .actions-header {
   padding: 10px 8px 8px;
   border-bottom: 1px solid #383c45;
   overflow: visible;
+  position: relative;
+  z-index: 25;
 }
 
 .actions-header h2 {
@@ -504,21 +507,27 @@ button:disabled {
   display: flex;
   gap: 6px;
   align-items: stretch;
+  flex-wrap: wrap;
   min-width: 0;
 }
 
-.actions-filters input {
+.actions-filters > input {
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 1 1 240px;
   height: 34px;
 }
 
 .actions-filter-dropdown {
   position: relative;
-  min-width: 140px;
+  min-width: 136px;
   max-width: 260px;
-  flex: 0 0 180px;
+  flex: 0 1 180px;
   align-self: stretch;
+}
+
+.actions-filter-dropdown-advanced {
+  flex: 0 1 130px;
+  min-width: 130px;
 }
 
 .actions-filter-summary {
@@ -567,7 +576,7 @@ button:disabled {
   left: 0;
   min-width: 220px;
   max-width: 280px;
-  z-index: 20;
+  z-index: 120;
   border: 1px solid #3f444f;
   background: #191d25;
   padding: 8px 10px;
@@ -575,6 +584,122 @@ button:disabled {
   flex-direction: column;
   gap: 0;
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+}
+
+.actions-advanced-filter-menu {
+  left: auto;
+  right: 0;
+  min-width: 320px;
+  width: min(560px, calc(100vw - 36px));
+  max-width: min(560px, calc(100vw - 36px));
+  gap: 10px;
+}
+
+.actions-advanced-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.actions-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.actions-filter-field span {
+  font-size: 11px;
+  color: #aeb5c2;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.actions-filter-field input,
+.actions-filter-field select {
+  width: 100%;
+  min-width: 0;
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 5px 8px;
+}
+
+.actions-filter-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding-top: 4px;
+  border-top: 1px solid #303745;
+}
+
+.actions-check-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #d5dae4;
+  user-select: none;
+}
+
+.actions-check-option input {
+  margin: 0;
+}
+
+.actions-console-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid #303745;
+}
+
+.actions-console-levels > span {
+  font-size: 11px;
+  color: #aeb5c2;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.actions-level-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.actions-level-chip {
+  border: 1px solid #414854;
+  background: #1f232c;
+  color: #ced4df;
+  padding: 3px 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.actions-level-chip.active {
+  border-color: #4f9dff;
+  background: rgba(50, 91, 152, 0.4);
+  color: #e8f2ff;
+}
+
+.actions-level-chip-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.actions-level-chip-actions button,
+.actions-advanced-actions button {
+  border: 1px solid #414854;
+  background: #20252f;
+  color: #d1d7e2;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.actions-advanced-actions {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid #303745;
+  padding-top: 4px;
 }
 
 .actions-kind-check {
@@ -623,6 +748,8 @@ select {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  position: relative;
+  z-index: 1;
 }
 
 .action-row {
@@ -1470,6 +1597,10 @@ body.resizing-active {
 
   .actions-filter-dropdown {
     max-width: none;
+  }
+
+  .actions-advanced-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .actions-filter-menu {

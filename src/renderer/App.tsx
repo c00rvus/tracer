@@ -18,6 +18,7 @@ import { WindowTitleBar } from "./components/WindowTitleBar";
 import { resolveScreenshotContext } from "./view-model/selectionResolvers";
 import {
   ACTION_FILTER_OPTIONS,
+  CONSOLE_LEVEL_FILTER_OPTIONS,
   filterEventRows,
   getConsoleAroundEvent,
   getErrorsAroundEvent,
@@ -25,7 +26,10 @@ import {
   getWindowByIndex,
   sortTimeline,
   toEventRows,
-  type ActionFilterKind
+  type ActionFilterKind,
+  type ActionHttpMethodFilter,
+  type ActionRowFilters,
+  type ConsoleLevelFilter
 } from "./view-model/timelineMapping";
 import type { FilmstripFrameViewModel } from "./view-model/types";
 
@@ -110,6 +114,30 @@ function areStringListsEqual(a: string[], b: string[]): boolean {
   return true;
 }
 
+function parseNullableInteger(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return parsed;
+}
+
+function parseNullableSecondsToMs(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = Number.parseFloat(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+  return Math.round(parsed * 1000);
+}
+
 function pruneScreenshotCache(
   cache: Record<string, ScreenshotPayload>,
   usageMap: Map<string, number>,
@@ -158,6 +186,20 @@ export function App(): JSX.Element {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedKinds, setSelectedKinds] = useState<ActionFilterKind[]>(ACTION_FILTER_OPTIONS);
+  const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
+  const [regexSearchEnabled, setRegexSearchEnabled] = useState(false);
+  const [urlFilter, setUrlFilter] = useState("");
+  const [requestIdFilter, setRequestIdFilter] = useState("");
+  const [methodFilter, setMethodFilter] = useState<ActionHttpMethodFilter>("all");
+  const [statusMinFilter, setStatusMinFilter] = useState("");
+  const [statusMaxFilter, setStatusMaxFilter] = useState("");
+  const [timeStartSecFilter, setTimeStartSecFilter] = useState("");
+  const [timeEndSecFilter, setTimeEndSecFilter] = useState("");
+  const [hideStaticAssets, setHideStaticAssets] = useState(false);
+  const [onlyErrorsFilter, setOnlyErrorsFilter] = useState(false);
+  const [consoleLevelFilters, setConsoleLevelFilters] = useState<ConsoleLevelFilter[]>(
+    CONSOLE_LEVEL_FILTER_OPTIONS
+  );
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [screenshotById, setScreenshotById] = useState<Record<string, ScreenshotPayload>>({});
@@ -625,9 +667,43 @@ export function App(): JSX.Element {
   }, [currentFrame?.event.screenshotId, fullScreenshotById, touchUsage]);
 
   const eventRows = useMemo(() => toEventRows(logsTimeline), [logsTimeline]);
+  const actionRowFilters = useMemo<ActionRowFilters>(
+    () => ({
+      search,
+      selectedKinds,
+      caseSensitive: searchCaseSensitive,
+      regexSearch: regexSearchEnabled,
+      urlContains: urlFilter,
+      requestIdContains: requestIdFilter,
+      method: methodFilter,
+      statusMin: parseNullableInteger(statusMinFilter),
+      statusMax: parseNullableInteger(statusMaxFilter),
+      relStartMs: parseNullableSecondsToMs(timeStartSecFilter),
+      relEndMs: parseNullableSecondsToMs(timeEndSecFilter),
+      hideStaticAssets,
+      onlyErrors: onlyErrorsFilter,
+      consoleLevels: consoleLevelFilters
+    }),
+    [
+      consoleLevelFilters,
+      hideStaticAssets,
+      methodFilter,
+      onlyErrorsFilter,
+      regexSearchEnabled,
+      requestIdFilter,
+      search,
+      searchCaseSensitive,
+      selectedKinds,
+      statusMaxFilter,
+      statusMinFilter,
+      timeEndSecFilter,
+      timeStartSecFilter,
+      urlFilter
+    ]
+  );
   const filteredRows = useMemo(
-    () => filterEventRows(eventRows, search, selectedKinds),
-    [eventRows, search, selectedKinds]
+    () => filterEventRows(eventRows, actionRowFilters),
+    [actionRowFilters, eventRows]
   );
 
   const totalDurationMs = sortedTimeline.length > 0 ? sortedTimeline[sortedTimeline.length - 1].tRelMs : 0;
@@ -842,6 +918,47 @@ export function App(): JSX.Element {
 
   const handleSetKindFilters = useCallback((nextKinds: ActionFilterKind[]) => {
     setSelectedKinds(() => ACTION_FILTER_OPTIONS.filter((kind) => nextKinds.includes(kind)));
+  }, []);
+
+  const handleToggleConsoleLevelFilter = useCallback(
+    (level: ConsoleLevelFilter, selected: boolean) => {
+      setConsoleLevelFilters((previous) => {
+        if (selected) {
+          if (previous.includes(level)) {
+            return previous;
+          }
+          return CONSOLE_LEVEL_FILTER_OPTIONS.filter(
+            (option) => previous.includes(option) || option === level
+          );
+        }
+        if (!previous.includes(level)) {
+          return previous;
+        }
+        return previous.filter((option) => option !== level);
+      });
+    },
+    []
+  );
+
+  const handleSetConsoleLevelFilters = useCallback((levels: ConsoleLevelFilter[]) => {
+    setConsoleLevelFilters(() =>
+      CONSOLE_LEVEL_FILTER_OPTIONS.filter((level) => levels.includes(level))
+    );
+  }, []);
+
+  const handleClearAdvancedActionFilters = useCallback(() => {
+    setSearchCaseSensitive(false);
+    setRegexSearchEnabled(false);
+    setUrlFilter("");
+    setRequestIdFilter("");
+    setMethodFilter("all");
+    setStatusMinFilter("");
+    setStatusMaxFilter("");
+    setTimeStartSecFilter("");
+    setTimeEndSecFilter("");
+    setHideStaticAssets(false);
+    setOnlyErrorsFilter(false);
+    setConsoleLevelFilters(CONSOLE_LEVEL_FILTER_OPTIONS);
   }, []);
 
   const handleToggleLiveScreenshotSync = useCallback(
@@ -1134,11 +1251,37 @@ export function App(): JSX.Element {
                 selectedEventId={selectedEventId}
                 search={search}
                 selectedKinds={selectedKinds}
+                searchCaseSensitive={searchCaseSensitive}
+                regexSearchEnabled={regexSearchEnabled}
+                urlFilter={urlFilter}
+                requestIdFilter={requestIdFilter}
+                methodFilter={methodFilter}
+                statusMinFilter={statusMinFilter}
+                statusMaxFilter={statusMaxFilter}
+                timeStartSecFilter={timeStartSecFilter}
+                timeEndSecFilter={timeEndSecFilter}
+                hideStaticAssets={hideStaticAssets}
+                onlyErrorsFilter={onlyErrorsFilter}
+                consoleLevelFilters={consoleLevelFilters}
                 liveHoverSyncEnabled={actionsLiveHoverSyncEnabled}
                 autoFollowLogs={actionsLiveLogsFollowEnabled}
                 onSearchChange={setSearch}
                 onToggleKindFilter={handleToggleKindFilter}
                 onSetKindFilters={handleSetKindFilters}
+                onSearchCaseSensitiveChange={setSearchCaseSensitive}
+                onRegexSearchChange={setRegexSearchEnabled}
+                onUrlFilterChange={setUrlFilter}
+                onRequestIdFilterChange={setRequestIdFilter}
+                onMethodFilterChange={setMethodFilter}
+                onStatusMinFilterChange={setStatusMinFilter}
+                onStatusMaxFilterChange={setStatusMaxFilter}
+                onTimeStartSecFilterChange={setTimeStartSecFilter}
+                onTimeEndSecFilterChange={setTimeEndSecFilter}
+                onHideStaticAssetsChange={setHideStaticAssets}
+                onOnlyErrorsFilterChange={setOnlyErrorsFilter}
+                onToggleConsoleLevelFilter={handleToggleConsoleLevelFilter}
+                onSetConsoleLevelFilters={handleSetConsoleLevelFilters}
+                onClearAdvancedFilters={handleClearAdvancedActionFilters}
                 onToggleLiveHoverSync={setActionsLiveHoverSyncEnabled}
                 onSelectEvent={handleSelectEvent}
                 onHoverWindow={handleActionsHoverWindow}

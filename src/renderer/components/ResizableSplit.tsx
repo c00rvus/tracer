@@ -30,6 +30,11 @@ export function ResizableSplit({
 }: ResizableSplitProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [ratio, setRatio] = useState<number>(() => clamp(initialRatio, 0.15, 0.85));
+  const ratioRef = useRef<number>(ratio);
+
+  useEffect(() => {
+    ratioRef.current = ratio;
+  }, [ratio]);
 
   useEffect(() => {
     if (!storageKey) {
@@ -42,23 +47,28 @@ export function ResizableSplit({
       }
       const parsed = Number(raw);
       if (Number.isFinite(parsed)) {
-        setRatio(clamp(parsed, 0.1, 0.9));
+        const nextRatio = clamp(parsed, 0.1, 0.9);
+        ratioRef.current = nextRatio;
+        setRatio(nextRatio);
       }
     } catch {
       // ignore localStorage read errors
     }
   }, [storageKey]);
 
-  useEffect(() => {
-    if (!storageKey) {
-      return;
-    }
-    try {
-      localStorage.setItem(storageKey, String(ratio));
-    } catch {
-      // ignore localStorage write errors
-    }
-  }, [ratio, storageKey]);
+  const persistRatio = useCallback(
+    (value: number): void => {
+      if (!storageKey) {
+        return;
+      }
+      try {
+        localStorage.setItem(storageKey, String(value));
+      } catch {
+        // ignore localStorage write errors
+      }
+    },
+    [storageKey]
+  );
 
   const onMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -68,31 +78,64 @@ export function ResizableSplit({
         return;
       }
 
-      const onMouseMove = (moveEvent: MouseEvent): void => {
-        const rect = container.getBoundingClientRect();
-        const totalSize = orientation === "vertical" ? rect.width : rect.height;
-        if (totalSize <= 0) {
+      const rect = container.getBoundingClientRect();
+      const totalSize = orientation === "vertical" ? rect.width : rect.height;
+      if (totalSize <= 0) {
+        return;
+      }
+
+      const minRatio = clamp(minPrimarySize / totalSize, 0, 0.95);
+      const maxRatio = clamp(1 - minSecondarySize / totalSize, 0.05, 1);
+      let pendingRatio = ratioRef.current;
+      let rafId: number | null = null;
+
+      const flushPendingRatio = (): void => {
+        rafId = null;
+        if (pendingRatio === ratioRef.current) {
           return;
         }
+        ratioRef.current = pendingRatio;
+        setRatio(pendingRatio);
+      };
 
-        const pointer = orientation === "vertical" ? moveEvent.clientX - rect.left : moveEvent.clientY - rect.top;
-        const minRatio = clamp(minPrimarySize / totalSize, 0, 0.95);
-        const maxRatio = clamp(1 - minSecondarySize / totalSize, 0.05, 1);
+      const scheduleRatioUpdate = (): void => {
+        if (rafId !== null) {
+          return;
+        }
+        rafId = window.requestAnimationFrame(flushPendingRatio);
+      };
+
+      const onMouseMove = (moveEvent: MouseEvent): void => {
+        const pointer =
+          orientation === "vertical"
+            ? moveEvent.clientX - rect.left
+            : moveEvent.clientY - rect.top;
         const nextRatio = clamp(pointer / totalSize, minRatio, maxRatio);
-        setRatio(nextRatio);
+        if (nextRatio === pendingRatio) {
+          return;
+        }
+        pendingRatio = nextRatio;
+        scheduleRatioUpdate();
       };
 
       const onMouseUp = (): void => {
         window.removeEventListener("mousemove", onMouseMove);
         window.removeEventListener("mouseup", onMouseUp);
         document.body.classList.remove("resizing-active");
+
+        if (rafId !== null) {
+          window.cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        flushPendingRatio();
+        persistRatio(pendingRatio);
       };
 
       document.body.classList.add("resizing-active");
-      window.addEventListener("mousemove", onMouseMove);
+      window.addEventListener("mousemove", onMouseMove, { passive: true });
       window.addEventListener("mouseup", onMouseUp);
     },
-    [minPrimarySize, minSecondarySize, orientation]
+    [minPrimarySize, minSecondarySize, orientation, persistRatio]
   );
 
   const templateStyle = useMemo(() => {

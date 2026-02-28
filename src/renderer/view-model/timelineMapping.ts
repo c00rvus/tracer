@@ -1,8 +1,35 @@
-import type { CaptureEvent } from "../../shared/types";
+import type { CaptureEvent, ConsoleEvent } from "../../shared/types";
 import { eventBadge, eventSubtitle, eventTitle, formatRelSeconds } from "./eventSummaries";
 import type { EventRowViewModel } from "./types";
 
 export type ActionFilterKind = Exclude<CaptureEvent["kind"], "screenshot"> | "errors";
+export type ConsoleLevelFilter = ConsoleEvent["level"];
+export type ActionHttpMethodFilter =
+  | "all"
+  | "GET"
+  | "POST"
+  | "PUT"
+  | "PATCH"
+  | "DELETE"
+  | "OPTIONS"
+  | "HEAD";
+
+export interface ActionRowFilters {
+  search: string;
+  selectedKinds: ActionFilterKind[];
+  caseSensitive: boolean;
+  regexSearch: boolean;
+  urlContains: string;
+  requestIdContains: string;
+  method: ActionHttpMethodFilter;
+  statusMin: number | null;
+  statusMax: number | null;
+  relStartMs: number | null;
+  relEndMs: number | null;
+  hideStaticAssets: boolean;
+  onlyErrors: boolean;
+  consoleLevels: ConsoleLevelFilter[];
+}
 
 export const ACTION_FILTER_OPTIONS: ActionFilterKind[] = [
   "errors",
@@ -12,6 +39,31 @@ export const ACTION_FILTER_OPTIONS: ActionFilterKind[] = [
   "network_fail",
   "lifecycle"
 ];
+
+export const CONSOLE_LEVEL_FILTER_OPTIONS: ConsoleLevelFilter[] = [
+  "log",
+  "info",
+  "warn",
+  "error",
+  "debug"
+];
+
+export const ACTION_HTTP_METHOD_FILTER_OPTIONS: ActionHttpMethodFilter[] = [
+  "all",
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OPTIONS",
+  "HEAD"
+];
+
+const STATIC_ASSET_URL_PATTERN =
+  /\.(?:avif|bmp|css|eot|gif|ico|jpe?g|js|json|map|mjs|otf|png|svg|ttf|webp|woff2?|mp4|webm|mp3|wav)(?:[?#]|$)/i;
+const STATIC_RESOURCE_TYPES = new Set(["Image", "Stylesheet", "Script", "Font", "Media", "Manifest"]);
+const STATIC_MIME_PATTERN =
+  /^(image\/|font\/|audio\/|video\/|text\/css|text\/javascript|application\/javascript|application\/x-javascript)/i;
 
 export function compareCaptureEvents(a: CaptureEvent, b: CaptureEvent): number {
   if (a.tsMs !== b.tsMs) {
@@ -38,6 +90,100 @@ function getRequestId(event: CaptureEvent): string | null {
   return null;
 }
 
+function isErrorEvent(event: CaptureEvent): boolean {
+  return event.kind === "network_fail" || (event.kind === "console" && event.level === "error");
+}
+
+function normalizeForSearch(value: string, caseSensitive: boolean): string {
+  return caseSensitive ? value : value.toLowerCase();
+}
+
+function includesText(value: string, query: string, caseSensitive: boolean): boolean {
+  if (!query) {
+    return true;
+  }
+  const normalizedValue = normalizeForSearch(value, caseSensitive);
+  const normalizedQuery = normalizeForSearch(query, caseSensitive);
+  return normalizedValue.includes(normalizedQuery);
+}
+
+function parseRequestInfo(
+  rows: EventRowViewModel[]
+): {
+  methodByRequestId: Map<string, string>;
+  urlByRequestId: Map<string, string>;
+} {
+  const methodByRequestId = new Map<string, string>();
+  const urlByRequestId = new Map<string, string>();
+
+  for (const row of rows) {
+    if (row.event.kind !== "network_request") {
+      continue;
+    }
+    methodByRequestId.set(row.event.requestId, row.event.method.toUpperCase());
+    urlByRequestId.set(row.event.requestId, row.event.url);
+  }
+
+  return {
+    methodByRequestId,
+    urlByRequestId
+  };
+}
+
+function getEventUrl(event: CaptureEvent, urlByRequestId: Map<string, string>): string {
+  if (event.kind === "network_request") {
+    return event.url;
+  }
+  if (event.kind === "network_response") {
+    return urlByRequestId.get(event.requestId) ?? "";
+  }
+  if (event.kind === "network_fail") {
+    return event.url ?? urlByRequestId.get(event.requestId) ?? "";
+  }
+  return event.pageUrl ?? "";
+}
+
+function getEventMethod(event: CaptureEvent, methodByRequestId: Map<string, string>): string {
+  if (event.kind === "network_request") {
+    return event.method.toUpperCase();
+  }
+  if (event.kind === "network_response" || event.kind === "network_fail") {
+    return methodByRequestId.get(event.requestId) ?? "";
+  }
+  return "";
+}
+
+function isStaticAssetEvent(event: CaptureEvent, urlByRequestId: Map<string, string>): boolean {
+  if (
+    event.kind !== "network_request" &&
+    event.kind !== "network_response" &&
+    event.kind !== "network_fail"
+  ) {
+    return false;
+  }
+
+  const url = getEventUrl(event, urlByRequestId);
+  if (url && STATIC_ASSET_URL_PATTERN.test(url)) {
+    return true;
+  }
+
+  if (event.kind === "network_request") {
+    if (event.resourceType && STATIC_RESOURCE_TYPES.has(event.resourceType)) {
+      return true;
+    }
+    return false;
+  }
+
+  if (event.kind === "network_response") {
+    if (event.mimeType && STATIC_MIME_PATTERN.test(event.mimeType)) {
+      return true;
+    }
+    return false;
+  }
+
+  return false;
+}
+
 export function toEventRows(events: CaptureEvent[]): EventRowViewModel[] {
   return events.map((event, index) => {
     const prev = events[index - 1];
@@ -60,28 +206,102 @@ export function toEventRows(events: CaptureEvent[]): EventRowViewModel[] {
 
 export function filterEventRows(
   rows: EventRowViewModel[],
-  search: string,
-  selectedKinds: ActionFilterKind[]
+  filters: ActionRowFilters
 ): EventRowViewModel[] {
-  const query = search.trim().toLowerCase();
-  const allowedKinds = new Set<ActionFilterKind>(selectedKinds);
+  const query = filters.search.trim();
+  const urlQuery = filters.urlContains.trim();
+  const requestIdQuery = filters.requestIdContains.trim();
+  const hasStatusFilter = filters.statusMin !== null || filters.statusMax !== null;
+  const hasTimeFilter = filters.relStartMs !== null || filters.relEndMs !== null;
+  const allowedKinds = new Set<ActionFilterKind>(filters.selectedKinds);
+  const allowedConsoleLevels = new Set<ConsoleLevelFilter>(filters.consoleLevels);
+  const { methodByRequestId, urlByRequestId } = parseRequestInfo(rows);
+
+  let searchRegex: RegExp | null = null;
+  if (filters.regexSearch && query) {
+    try {
+      searchRegex = new RegExp(query, filters.caseSensitive ? "" : "i");
+    } catch {
+      searchRegex = null;
+    }
+  }
+
   return rows.filter((row) => {
     if (row.kind === "screenshot") {
       return false;
     }
-    const isErrorRow =
-      row.event.kind === "network_fail" ||
-      (row.event.kind === "console" && row.event.level === "error");
+
+    const isErrorRow = isErrorEvent(row.event);
     const kindSelected =
       allowedKinds.has(row.kind as ActionFilterKind) || (allowedKinds.has("errors") && isErrorRow);
     if (!kindSelected) {
       return false;
     }
+
+    if (filters.onlyErrors && !isErrorRow) {
+      return false;
+    }
+
+    if (row.event.kind === "console" && !allowedConsoleLevels.has(row.event.level)) {
+      return false;
+    }
+
+    if (filters.method !== "all") {
+      const eventMethod = getEventMethod(row.event, methodByRequestId);
+      if (!eventMethod || eventMethod !== filters.method) {
+        return false;
+      }
+    }
+
+    if (hasStatusFilter) {
+      if (row.event.kind !== "network_response") {
+        return false;
+      }
+      if (filters.statusMin !== null && row.event.status < filters.statusMin) {
+        return false;
+      }
+      if (filters.statusMax !== null && row.event.status > filters.statusMax) {
+        return false;
+      }
+    }
+
+    if (hasTimeFilter) {
+      if (filters.relStartMs !== null && row.relMs < filters.relStartMs) {
+        return false;
+      }
+      if (filters.relEndMs !== null && row.relMs > filters.relEndMs) {
+        return false;
+      }
+    }
+
+    if (filters.hideStaticAssets && isStaticAssetEvent(row.event, urlByRequestId)) {
+      return false;
+    }
+
+    if (urlQuery) {
+      const eventUrl = getEventUrl(row.event, urlByRequestId);
+      if (!includesText(eventUrl, urlQuery, filters.caseSensitive)) {
+        return false;
+      }
+    }
+
+    if (requestIdQuery) {
+      const requestId = getRequestId(row.event) ?? "";
+      if (!includesText(requestId, requestIdQuery, filters.caseSensitive)) {
+        return false;
+      }
+    }
+
     if (!query) {
       return true;
     }
-    const haystack = `${row.title} ${row.subtitle} ${JSON.stringify(row.event)}`.toLowerCase();
-    return haystack.includes(query);
+
+    const haystack = `${row.title} ${row.subtitle} ${JSON.stringify(row.event)}`;
+    if (searchRegex) {
+      return searchRegex.test(haystack);
+    }
+
+    return includesText(haystack, query, filters.caseSensitive);
   });
 }
 
