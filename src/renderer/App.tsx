@@ -280,6 +280,9 @@ export function App(): JSX.Element {
       if (disposed || inFlight) {
         return;
       }
+      if (typeof document !== "undefined" && document.body.classList.contains("resizing-active")) {
+        return;
+      }
       inFlight = true;
       try {
         await refresh();

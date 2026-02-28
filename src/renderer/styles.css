@@ -936,6 +936,8 @@ select {
   justify-content: center;
   background: #121318;
   overflow: hidden;
+  position: relative;
+  contain: layout paint;
 }
 
 .preview-main-shot img {
@@ -946,6 +948,18 @@ select {
   display: block;
   object-fit: contain;
   object-position: center;
+}
+
+body.resizing-vertical .preview-main-shot img {
+  display: none;
+}
+
+body.resizing-vertical .preview-main-shot::after {
+  content: "Resizing preview…";
+  color: #8f97a8;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
 }
 
 .preview-empty,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 type Orientation = "vertical" | "horizontal";
@@ -32,9 +32,29 @@ export function ResizableSplit({
   const [ratio, setRatio] = useState<number>(() => clamp(initialRatio, 0.15, 0.85));
   const ratioRef = useRef<number>(ratio);
 
+  const applyRatioToContainer = useCallback(
+    (nextRatio: number): void => {
+      const container = containerRef.current;
+      if (!container) {
+        return;
+      }
+      const ratioPercent = `${(nextRatio * 100).toFixed(3)}%`;
+      if (orientation === "vertical") {
+        container.style.gridTemplateColumns = `${ratioPercent} 6px minmax(0, 1fr)`;
+      } else {
+        container.style.gridTemplateRows = `${ratioPercent} 6px minmax(0, 1fr)`;
+      }
+    },
+    [orientation]
+  );
+
   useEffect(() => {
     ratioRef.current = ratio;
   }, [ratio]);
+
+  useLayoutEffect(() => {
+    applyRatioToContainer(ratio);
+  }, [applyRatioToContainer, ratio]);
 
   useEffect(() => {
     if (!storageKey) {
@@ -89,20 +109,24 @@ export function ResizableSplit({
       let pendingRatio = ratioRef.current;
       let rafId: number | null = null;
 
-      const flushPendingRatio = (): void => {
+      const flushPendingRatio = (commitToState: boolean): void => {
         rafId = null;
-        if (pendingRatio === ratioRef.current) {
-          return;
+        if (pendingRatio !== ratioRef.current) {
+          ratioRef.current = pendingRatio;
+          applyRatioToContainer(pendingRatio);
         }
-        ratioRef.current = pendingRatio;
-        setRatio(pendingRatio);
+        if (commitToState) {
+          setRatio(pendingRatio);
+        }
       };
 
       const scheduleRatioUpdate = (): void => {
         if (rafId !== null) {
           return;
         }
-        rafId = window.requestAnimationFrame(flushPendingRatio);
+        rafId = window.requestAnimationFrame(() => {
+          flushPendingRatio(false);
+        });
       };
 
       const onMouseMove = (moveEvent: MouseEvent): void => {
@@ -122,39 +146,31 @@ export function ResizableSplit({
         window.removeEventListener("mousemove", onMouseMove);
         window.removeEventListener("mouseup", onMouseUp);
         document.body.classList.remove("resizing-active");
+        document.body.classList.remove("resizing-vertical");
+        document.body.classList.remove("resizing-horizontal");
 
         if (rafId !== null) {
           window.cancelAnimationFrame(rafId);
           rafId = null;
         }
-        flushPendingRatio();
+        flushPendingRatio(true);
         persistRatio(pendingRatio);
       };
 
       document.body.classList.add("resizing-active");
+      document.body.classList.add(
+        orientation === "vertical" ? "resizing-vertical" : "resizing-horizontal"
+      );
       window.addEventListener("mousemove", onMouseMove, { passive: true });
       window.addEventListener("mouseup", onMouseUp);
     },
-    [minPrimarySize, minSecondarySize, orientation, persistRatio]
+    [applyRatioToContainer, minPrimarySize, minSecondarySize, orientation, persistRatio]
   );
-
-  const templateStyle = useMemo(() => {
-    const ratioPercent = `${(ratio * 100).toFixed(3)}%`;
-    if (orientation === "vertical") {
-      return {
-        gridTemplateColumns: `${ratioPercent} 6px minmax(0, 1fr)`
-      };
-    }
-    return {
-      gridTemplateRows: `${ratioPercent} 6px minmax(0, 1fr)`
-    };
-  }, [orientation, ratio]);
 
   return (
     <div
       ref={containerRef}
       className={`resizable-split ${orientation} ${className ?? ""}`.trim()}
-      style={templateStyle}
     >
       <div className="resizable-pane primary">{primary}</div>
       <div className="resizable-handle" onMouseDown={onMouseDown} />
