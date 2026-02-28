@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { formatRelMs } from "../view-model/eventSummaries";
 import {
   ACTION_FILTER_OPTIONS,
@@ -9,6 +9,9 @@ import {
   type ConsoleLevelFilter
 } from "../view-model/timelineMapping";
 import type { EventRowViewModel } from "../view-model/types";
+
+const ACTION_ROW_HEIGHT_PX = 58;
+const ACTION_ROW_OVERSCAN = 8;
 
 interface ActionsPanelProps {
   rows: EventRowViewModel[];
@@ -91,13 +94,14 @@ export function ActionsPanel({
   onSelectEvent,
   onHoverWindow
 }: ActionsPanelProps): JSX.Element {
-  const selectedRowRef = useRef<HTMLButtonElement | null>(null);
   const selectAllRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const filterDropdownRef = useRef<HTMLDetailsElement | null>(null);
   const advancedFilterDropdownRef = useRef<HTMLDetailsElement | null>(null);
   const prevRowsCountRef = useRef(0);
   const wasAutoFollowRef = useRef(false);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [scrollTop, setScrollTop] = useState(0);
   const badgeClassFor = (badge: string): string => `row-badge-${badge.toLowerCase()}`;
   const selectedSummary = ACTION_FILTER_OPTIONS.filter((kind) => selectedKinds.includes(kind));
   const summaryLabel =
@@ -123,16 +127,83 @@ export function ActionsPanel({
     (allConsoleLevelsSelected ? 0 : 1);
   const advancedSummaryLabel =
     advancedFiltersCount > 0 ? `Filters (${advancedFiltersCount})` : "Filters";
+  const selectedRowIndex = useMemo(() => {
+    if (!selectedEventId) {
+      return -1;
+    }
+    return rows.findIndex((row) => row.id === selectedEventId);
+  }, [rows, selectedEventId]);
+  const totalHeight = rows.length * ACTION_ROW_HEIGHT_PX;
+  const safeViewportHeight = Math.max(1, viewportHeight);
+  const startIndex = Math.max(0, Math.floor(scrollTop / ACTION_ROW_HEIGHT_PX) - ACTION_ROW_OVERSCAN);
+  const endIndex = Math.min(
+    rows.length,
+    Math.ceil((scrollTop + safeViewportHeight) / ACTION_ROW_HEIGHT_PX) + ACTION_ROW_OVERSCAN
+  );
+  const visibleRows = rows.slice(startIndex, endIndex);
+  const offsetY = startIndex * ACTION_ROW_HEIGHT_PX;
 
   useEffect(() => {
-    if (!selectedRowRef.current) {
+    const list = listRef.current;
+    if (!list || selectedRowIndex < 0) {
       return;
     }
-    selectedRowRef.current.scrollIntoView({
-      behavior: "smooth",
-      block: "nearest"
+    const rowTop = selectedRowIndex * ACTION_ROW_HEIGHT_PX;
+    const rowBottom = rowTop + ACTION_ROW_HEIGHT_PX;
+    const viewportTop = list.scrollTop;
+    const viewportBottom = viewportTop + list.clientHeight;
+    if (rowTop >= viewportTop && rowBottom <= viewportBottom) {
+      return;
+    }
+    const targetTop = Math.max(
+      0,
+      rowTop - Math.max(0, Math.floor((list.clientHeight - ACTION_ROW_HEIGHT_PX) / 2))
+    );
+    list.scrollTo({
+      top: targetTop,
+      behavior: "smooth"
     });
-  }, [selectedEventId]);
+  }, [selectedRowIndex]);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) {
+      return;
+    }
+
+    const updateViewport = (): void => {
+      setViewportHeight(list.clientHeight);
+    };
+
+    updateViewport();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateViewport);
+      return () => {
+        window.removeEventListener("resize", updateViewport);
+      };
+    }
+
+    const observer = new ResizeObserver(() => {
+      updateViewport();
+    });
+    observer.observe(list);
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) {
+      return;
+    }
+    const maxScroll = Math.max(0, totalHeight - list.clientHeight);
+    if (list.scrollTop <= maxScroll) {
+      return;
+    }
+    list.scrollTop = maxScroll;
+    setScrollTop(maxScroll);
+  }, [totalHeight, viewportHeight]);
 
   useEffect(() => {
     if (!selectAllRef.current) {
@@ -206,6 +277,10 @@ export function ActionsPanel({
       behavior: "smooth"
     });
   }, [autoFollowLogs, rows.length]);
+
+  const handleListScroll = useCallback((event: UIEvent<HTMLDivElement>): void => {
+    setScrollTop(event.currentTarget.scrollTop);
+  }, []);
 
   return (
     <aside className="actions-panel">
@@ -409,32 +484,49 @@ export function ActionsPanel({
         </div>
       </header>
 
-      <div className="actions-list" ref={listRef} onMouseLeave={() => onHoverWindow(null)}>
+      <div
+        className="actions-list"
+        ref={listRef}
+        onScroll={handleListScroll}
+        onMouseLeave={() => onHoverWindow(null)}
+      >
         {rows.length === 0 && <p className="empty-state">No events found</p>}
-        {rows.map((row) => {
-          const selected = row.id === selectedEventId;
-          return (
-            <button
-              key={row.id}
-              ref={selected ? selectedRowRef : null}
-              className={`action-row ${selected ? "selected" : ""}`}
-              onClick={() => onSelectEvent(row.id)}
-              onMouseEnter={() => onHoverWindow({ startMs: row.relMs, durationMs: row.durationMs })}
-              onFocus={() => onHoverWindow({ startMs: row.relMs, durationMs: row.durationMs })}
-              onBlur={() => onHoverWindow(null)}
+        {rows.length > 0 && (
+          <div className="actions-list-spacer" style={{ height: `${totalHeight}px` }}>
+            <div
+              className="actions-list-window"
+              style={{ transform: `translateY(${offsetY}px)` }}
             >
-              <span className={`row-badge ${badgeClassFor(row.badge)}`}>{row.badge}</span>
-              <span className="row-main">
-                <span className="row-title">{row.title}</span>
-                <span className="row-subtitle">{row.subtitle}</span>
-              </span>
-              <span className="row-meta">
-                <span>{formatRelMs(row.deltaMs)}</span>
-                <span>{row.clockLabel}</span>
-              </span>
-            </button>
-          );
-        })}
+              {visibleRows.map((row) => {
+                const selected = row.id === selectedEventId;
+                return (
+                  <button
+                    key={row.id}
+                    className={`action-row ${selected ? "selected" : ""}`}
+                    onClick={() => onSelectEvent(row.id)}
+                    onMouseEnter={() =>
+                      onHoverWindow({ startMs: row.relMs, durationMs: row.durationMs })
+                    }
+                    onFocus={() =>
+                      onHoverWindow({ startMs: row.relMs, durationMs: row.durationMs })
+                    }
+                    onBlur={() => onHoverWindow(null)}
+                  >
+                    <span className={`row-badge ${badgeClassFor(row.badge)}`}>{row.badge}</span>
+                    <span className="row-main">
+                      <span className="row-title">{row.title}</span>
+                      <span className="row-subtitle">{row.subtitle}</span>
+                    </span>
+                    <span className="row-meta">
+                      <span>{formatRelMs(row.deltaMs)}</span>
+                      <span>{row.clockLabel}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </aside>
   );
