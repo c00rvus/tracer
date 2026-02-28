@@ -69,6 +69,9 @@ const MAX_TEMP_AUTOSAVES = 2;
 const TIMELINE_THUMBNAIL_WIDTH_PX = 240;
 const TIMELINE_THUMBNAIL_QUALITY = 72;
 const TRACER_MEDIA_PROTOCOL_SCHEME = "tracer-media";
+const MAC_SCROLL_CAPTURE_COOLDOWN_MS = 220;
+const MAC_TIMER_JPEG_QUALITY = 62;
+const MAC_EVENT_JPEG_QUALITY = 72;
 const CURSOR_OVERLAY_INIT_SCRIPT = `
 (() => {
   const globalState = globalThis;
@@ -169,12 +172,20 @@ const CURSOR_OVERLAY_INIT_SCRIPT = `
     element.style.transform = "translate(-2px, -2px) scale(1)";
   };
 
+  const markScroll = () => {
+    globalState.__tracerLastScrollAtMs = Date.now();
+  };
+
   const install = () => {
     ensureOverlay();
+    globalState.__tracerLastScrollAtMs = 0;
     window.addEventListener("mousemove", handleMove, { capture: true, passive: true });
     window.addEventListener("mouseleave", hide, { capture: true, passive: true });
     window.addEventListener("mousedown", press, { capture: true, passive: true });
     window.addEventListener("mouseup", release, { capture: true, passive: true });
+    window.addEventListener("wheel", markScroll, { capture: true, passive: true });
+    window.addEventListener("touchmove", markScroll, { capture: true, passive: true });
+    document.addEventListener("scroll", markScroll, { capture: true, passive: true });
     window.addEventListener("blur", hide, { passive: true });
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
@@ -193,6 +204,12 @@ const CURSOR_OVERLAY_INIT_SCRIPT = `
 
 type PlaywrightModule = typeof import("playwright");
 let playwrightModulePromise: Promise<PlaywrightModule> | null = null;
+
+interface ScreenshotEncoding {
+  fileExtension: "png" | "jpg";
+  type: "png" | "jpeg";
+  quality?: number;
+}
 
 async function loadPlaywright(): Promise<PlaywrightModule> {
   process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH ?? "0";
@@ -1063,7 +1080,17 @@ export class SessionManager {
   private async captureScreenshot(
     reason: ScreenshotEvent["reason"]
   ): Promise<void> {
+    if (process.platform === "darwin" && reason === "timer") {
+      const scrollingNow = await this.isMacScrollActive();
+      if (scrollingNow) {
+        return;
+      }
+    }
+
     if (reason === "timer" && this.screenshotRun) {
+      if (process.platform === "darwin") {
+        return;
+      }
       this.appendFallbackScreenshotFromLast(reason);
       return;
     }
@@ -1094,16 +1121,17 @@ export class SessionManager {
       return;
     }
 
+    const encoding = this.resolveScreenshotEncoding(reason);
     const screenshotId = randomUUID();
     const relativePath = path.join(
       "screenshots",
-      `${Date.now()}-${sanitizeFileFragment(screenshotId.slice(0, 8))}.png`
+      `${Date.now()}-${sanitizeFileFragment(screenshotId.slice(0, 8))}.${encoding.fileExtension}`
     );
     const absolutePath = path.join(this.sessionRoot, relativePath);
     await ensureDir(path.dirname(absolutePath));
 
     try {
-      await this.captureScreenshotWithRetry(absolutePath, reason);
+      await this.captureScreenshotWithRetry(absolutePath, reason, encoding);
     } catch (error) {
       log.warn(`Failed to capture screenshot (${reason}).`, error);
       try {
@@ -1143,9 +1171,14 @@ export class SessionManager {
 
   private async captureScreenshotWithRetry(
     absolutePath: string,
-    reason: ScreenshotEvent["reason"]
+    reason: ScreenshotEvent["reason"],
+    encoding: ScreenshotEncoding
   ): Promise<void> {
-    const attempts = this.captureSettings.fullPageScreenshots
+    const useFullPageFirstAttempt =
+      this.captureSettings.fullPageScreenshots &&
+      !(process.platform === "darwin" && reason === "timer");
+
+    const attempts = useFullPageFirstAttempt
       ? [
           { waitMs: 0, fullPage: true, timeoutMs: 1200 },
           { waitMs: 90, fullPage: false, timeoutMs: 1400 },
@@ -1167,11 +1200,16 @@ export class SessionManager {
       }
 
       try {
-        await this.page.screenshot({
+        const screenshotOptions: Parameters<Page["screenshot"]>[0] = {
           path: absolutePath,
           fullPage: attempt.fullPage,
-          timeout: attempt.timeoutMs
-        });
+          timeout: attempt.timeoutMs,
+          type: encoding.type
+        };
+        if (encoding.type === "jpeg") {
+          screenshotOptions.quality = encoding.quality ?? MAC_EVENT_JPEG_QUALITY;
+        }
+        await this.page.screenshot(screenshotOptions);
         return;
       } catch (error) {
         lastError = error;
@@ -1210,6 +1248,47 @@ export class SessionManager {
       reason
     };
     this.appendEvent(fallbackEvent);
+  }
+
+  private resolveScreenshotEncoding(reason: ScreenshotEvent["reason"]): ScreenshotEncoding {
+    if (process.platform !== "darwin") {
+      return {
+        fileExtension: "png",
+        type: "png"
+      };
+    }
+
+    if (reason === "timer") {
+      return {
+        fileExtension: "jpg",
+        type: "jpeg",
+        quality: MAC_TIMER_JPEG_QUALITY
+      };
+    }
+
+    return {
+      fileExtension: "jpg",
+      type: "jpeg",
+      quality: MAC_EVENT_JPEG_QUALITY
+    };
+  }
+
+  private async isMacScrollActive(): Promise<boolean> {
+    if (process.platform !== "darwin" || !this.page || this.page.isClosed()) {
+      return false;
+    }
+
+    try {
+      const isScrolling = await this.page.evaluate((cooldownMs) => {
+        const state = globalThis as { __tracerLastScrollAtMs?: number };
+        const lastScrollAtMs =
+          typeof state.__tracerLastScrollAtMs === "number" ? state.__tracerLastScrollAtMs : 0;
+        return Date.now() - lastScrollAtMs <= cooldownMs;
+      }, MAC_SCROLL_CAPTURE_COOLDOWN_MS);
+      return Boolean(isScrolling);
+    } catch {
+      return false;
+    }
   }
 
   private async waitForOngoingScreenshot(): Promise<void> {

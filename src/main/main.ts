@@ -328,7 +328,7 @@ async function createMainWindow(): Promise<void> {
     frame: !isWindows,
     thickFrame: isWindows,
     titleBarStyle: isWindows ? "hidden" : isMac ? "hiddenInset" : "default",
-    trafficLightPosition: isMac ? { x: 14, y: 12 } : undefined,
+    trafficLightPosition: isMac ? { x: 14, y: 8 } : undefined,
     backgroundColor: "#13151a",
     icon: isMac ? undefined : resolveIconPath(),
     autoHideMenuBar: isWindows,

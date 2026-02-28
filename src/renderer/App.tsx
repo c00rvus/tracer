@@ -152,6 +152,7 @@ function pruneScreenshotCache(
 export function App(): JSX.Element {
   const platform = window.tracer.window.platform;
   const isWindows = platform === "win32";
+  const isMac = platform === "darwin";
   const [status, setStatus] = useState<SessionStatus>(EMPTY_STATUS);
   const [timeline, setTimeline] = useState<CaptureEvent[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
@@ -1006,7 +1007,7 @@ export function App(): JSX.Element {
   }, [maybeTriggerLongCaptureWarning, status.state]);
 
   return (
-    <div className="trace-app">
+    <div className={isMac ? "trace-app trace-app-mac" : "trace-app"}>
       {isWindows && (
         <WindowTitleBar
           isMaximized={isWindowMaximized}
@@ -1016,6 +1017,7 @@ export function App(): JSX.Element {
           onClose={handleCloseWindow}
         />
       )}
+      {isMac && <div className="macos-drag-strip" aria-hidden />}
       <div className="trace-content">
       <TraceToolbar
         status={status}
