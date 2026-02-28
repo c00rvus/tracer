@@ -1,7 +1,10 @@
 const path = require("node:path");
+const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 
 const scriptPath = path.resolve(__dirname, "generate_app_icons.py");
+const buildDir = path.resolve(__dirname, "..", "build");
+const requiredIcons = ["icon.png", "icon.ico", "icon.icns"];
 
 const candidates =
   process.platform === "win32"
@@ -16,6 +19,12 @@ const candidates =
       ];
 
 let sawExecutionError = false;
+let sawScriptFailure = false;
+const failureMessages = [];
+
+function hasPrebuiltIcons() {
+  return requiredIcons.every((fileName) => fs.existsSync(path.join(buildDir, fileName)));
+}
 
 for (const candidate of candidates) {
   const result = spawnSync(candidate.command, [...candidate.args, scriptPath], {
@@ -34,15 +43,42 @@ for (const candidate of candidates) {
   }
 
   if (typeof result.status === "number") {
-    process.exit(result.status);
+    if (result.status === 0) {
+      process.exit(0);
+    }
+    sawScriptFailure = true;
+    failureMessages.push(
+      `[generate:icons] '${candidate.command} ${candidate.args.join(" ")}' exited with code ${result.status}.`
+    );
+    continue;
   }
 
   process.exit(1);
 }
 
-if (!sawExecutionError) {
+if (hasPrebuiltIcons()) {
+  if (sawScriptFailure || sawExecutionError) {
+    console.warn(
+      "[generate:icons] Icon generation failed, but prebuilt icons already exist in ./build. Continuing build."
+    );
+    if (failureMessages.length > 0) {
+      console.warn(failureMessages.join("\n"));
+    }
+    console.warn(
+      "[generate:icons] To regenerate icons locally, install Pillow: python3 -m pip install pillow"
+    );
+  }
+  process.exit(0);
+}
+
+if (!sawExecutionError && !sawScriptFailure) {
   console.error(
     "[generate:icons] Python not found. Install Python 3 and ensure 'python3' (macOS/Linux) or 'python'/'py' (Windows) is in PATH."
+  );
+} else if (failureMessages.length > 0) {
+  console.error(failureMessages.join("\n"));
+  console.error(
+    "[generate:icons] To generate icons from source, install Pillow: python3 -m pip install pillow"
   );
 }
 
