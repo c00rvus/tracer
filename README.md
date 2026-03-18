@@ -45,11 +45,18 @@ macOS package (DMG + ZIP):
 npm run dist:mac
 ```
 
+Linux package (AppImage + DEB + TAR.GZ):
+
+```bash
+npm run dist:linux
+```
+
 Build output:
 
 - Portable EXE in `release/`
 - Installer EXE in `release/` (for installed users and upgrades)
 - macOS DMG/ZIP in `release/` (must be built on macOS)
+- Linux AppImage/DEB/TAR.GZ in `release/` (recommended to build on Linux)
 
 ## Platform split
 
@@ -58,6 +65,25 @@ Build output:
 - Build targets are split in `electron-builder.yml`:
   - `win`: `portable` + `nsis`
   - `mac`: `dmg` + `zip`
+  - `linux`: `AppImage` + `deb` + `tar.gz`
+
+## Linux build notes
+
+For best results, build Linux packages on a Linux machine instead of cross-building from Windows.
+
+Typical Linux flow:
+
+```bash
+npm install
+npm run dist:linux
+```
+
+On Debian/Ubuntu, if packaging dependencies are missing, install:
+
+```bash
+sudo apt update
+sudo apt install build-essential fakeroot dpkg rpm
+```
 
 ## macOS unsigned build behavior
 
