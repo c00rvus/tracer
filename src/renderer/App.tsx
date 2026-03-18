@@ -73,6 +73,8 @@ function isUserCanceledMessage(message: string): boolean {
 const BANNER_AUTO_HIDE_MS = 5000;
 const MAX_TIMELINE_THUMBNAIL_CACHE = 240;
 const MAX_FULL_SCREENSHOT_CACHE = 10;
+const IMPORT_LOADING_DELAY_MS = 250;
+const IMPORT_STALL_TIMEOUT_MS = 15000;
 const LONG_CAPTURE_WARNING_MESSAGE =
   "This session has been recording for a long time. Make sure you don't leave capture running unintentionally.";
 const LONG_CAPTURE_WARNING_TITLE = "Long recording reminder";
@@ -209,6 +211,8 @@ export function App(): JSX.Element {
   );
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [importState, setImportState] = useState<"idle" | "pending" | "stalled">("idle");
+  const [importOverlayVisible, setImportOverlayVisible] = useState(false);
   const [screenshotById, setScreenshotById] = useState<Record<string, ScreenshotPayload>>({});
   const [fullScreenshotById, setFullScreenshotById] = useState<Record<string, ScreenshotPayload>>({});
   const [visibleTimelineScreenshotIds, setVisibleTimelineScreenshotIds] = useState<string[]>([]);
@@ -248,6 +252,10 @@ export function App(): JSX.Element {
   const fullScreenshotUsageRef = useRef<Map<string, number>>(new Map());
   const usageTickRef = useRef(0);
   const dismissedStatusErrorRef = useRef<string | null>(null);
+  const importStateRef = useRef<"idle" | "pending" | "stalled">("idle");
+  const importRequestIdRef = useRef(0);
+  const importOverlayDelayTimerRef = useRef<number | null>(null);
+  const importStallTimerRef = useRef<number | null>(null);
   const timelineCursorRef = useRef(0);
   const timelineSessionKeyRef = useRef<string | null>(null);
   const longCaptureWarningStateRef = useRef<{ key: string | null; lastReminderSlot: number }>({
@@ -258,6 +266,22 @@ export function App(): JSX.Element {
   const deferredSearch = useDeferredValue(search);
   const deferredUrlFilter = useDeferredValue(urlFilter);
   const deferredRequestIdFilter = useDeferredValue(requestIdFilter);
+
+  const setImportPhase = useCallback((phase: "idle" | "pending" | "stalled") => {
+    importStateRef.current = phase;
+    setImportState(phase);
+  }, []);
+
+  const clearImportTimers = useCallback(() => {
+    if (importOverlayDelayTimerRef.current !== null) {
+      window.clearTimeout(importOverlayDelayTimerRef.current);
+      importOverlayDelayTimerRef.current = null;
+    }
+    if (importStallTimerRef.current !== null) {
+      window.clearTimeout(importStallTimerRef.current);
+      importStallTimerRef.current = null;
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     const currentStatus = await window.tracer.session.getStatus();
@@ -360,6 +384,12 @@ export function App(): JSX.Element {
       setErrorMessage(error instanceof Error ? error.message : "Failed to load settings.");
     });
   }, [loadSettings]);
+
+  useEffect(() => {
+    return () => {
+      clearImportTimers();
+    };
+  }, [clearImportTimers]);
 
   useEffect(() => {
     if (!isWindows) {
@@ -548,7 +578,7 @@ export function App(): JSX.Element {
       return;
     }
 
-    const maxBatchSize = 24;
+    const maxBatchSize = status.state === "capturing" ? 12 : 6;
     const batch = Array.from(requestedIds)
       .filter((screenshotId) => {
         if (screenshotById[screenshotId]) {
@@ -637,6 +667,7 @@ export function App(): JSX.Element {
     protectedThumbnailIds,
     screenshotById,
     screenshotEvents,
+    status.state,
     touchUsage,
     visibleTimelineScreenshotIds
   ]);
@@ -848,6 +879,107 @@ export function App(): JSX.Element {
     },
     [refresh]
   );
+
+  const dismissImportOverlay = useCallback(() => {
+    setImportOverlayVisible(false);
+  }, []);
+
+  const handleOpenImport = useCallback(() => {
+    if (busy || importStateRef.current !== "idle") {
+      return;
+    }
+
+    setBusy(true);
+    setErrorMessage(null);
+    dismissedStatusErrorRef.current = null;
+    clearImportTimers();
+    setImportOverlayVisible(false);
+
+    void window.tracer.session
+      .chooseImportFile()
+      .then((selectedFilePath) => {
+        setBusy(false);
+        if (!selectedFilePath) {
+          return;
+        }
+
+        setImportPhase("pending");
+
+        const requestId = importRequestIdRef.current + 1;
+        importRequestIdRef.current = requestId;
+
+        importOverlayDelayTimerRef.current = window.setTimeout(() => {
+          if (importRequestIdRef.current !== requestId || importStateRef.current === "idle") {
+            return;
+          }
+          setImportOverlayVisible(true);
+        }, IMPORT_LOADING_DELAY_MS);
+
+        importStallTimerRef.current = window.setTimeout(() => {
+          if (importRequestIdRef.current !== requestId || importStateRef.current !== "pending") {
+            return;
+          }
+          setImportPhase("stalled");
+          setImportOverlayVisible(true);
+        }, IMPORT_STALL_TIMEOUT_MS);
+
+        const finishImport = async (
+          outcome:
+            | { type: "success"; wasStalled: boolean }
+            | { type: "error"; message: string; shouldRefresh: boolean }
+        ): Promise<void> => {
+          if (importRequestIdRef.current !== requestId) {
+            return;
+          }
+
+          clearImportTimers();
+          setImportPhase("idle");
+          setImportOverlayVisible(false);
+
+          if (outcome.type === "success") {
+            await refresh();
+            if (outcome.wasStalled) {
+              setSettingsNotice("Import completed.");
+            }
+            return;
+          }
+
+          if (outcome.shouldRefresh) {
+            await refresh();
+            return;
+          }
+          if (!isUserCanceledMessage(outcome.message)) {
+            setErrorMessage(outcome.message);
+          }
+        };
+
+        void window.tracer.session
+          .open(selectedFilePath)
+          .then(async () => {
+            await finishImport({
+              type: "success",
+              wasStalled: importStateRef.current === "stalled"
+            });
+          })
+          .catch(async (error) => {
+            const message = error instanceof Error ? error.message : "Unexpected error.";
+            await finishImport({
+              type: "error",
+              message,
+              shouldRefresh: isUserCanceledMessage(message)
+            });
+          });
+      })
+      .catch((error) => {
+        setBusy(false);
+        setImportPhase("idle");
+        setImportOverlayVisible(false);
+        const message = error instanceof Error ? error.message : "Failed to choose import file.";
+        if (!isUserCanceledMessage(message)) {
+          setErrorMessage(message);
+        }
+      });
+  }, [busy, clearImportTimers, refresh, setImportPhase]);
 
   const openSettings = useCallback(async () => {
     try {
@@ -1094,6 +1226,8 @@ export function App(): JSX.Element {
     });
   }, []);
 
+  const importInFlight = importState !== "idle";
+  const controlsBusy = busy || importInFlight;
   const actionsLiveLogsFollowEnabled = actionsLiveHoverSyncEnabled && status.state === "capturing";
   const actionsLiveHoverTimelineEnabled = actionsLiveHoverSyncEnabled && status.state !== "capturing";
   const combinedLiveAutoScrollEnabled =
@@ -1219,9 +1353,40 @@ export function App(): JSX.Element {
           </div>
         )}
 
+        {importOverlayVisible && (
+          <div
+            className="import-loading-overlay"
+            role="status"
+            aria-live="polite"
+            aria-busy={importState === "pending"}
+          >
+            <div className="import-loading-dialog">
+              <div className="import-loading-spinner" aria-hidden />
+              <h2>Importing session...</h2>
+              {importState === "pending" ? (
+                <p>Opening archive and rebuilding the timeline.</p>
+              ) : (
+                <p>
+                  Import is taking longer than expected. You can close this dialog and keep
+                  inspecting the current screen while the current import attempt continues in the
+                  background.
+                </p>
+              )}
+              {importState === "stalled" && (
+                <div className="import-loading-actions">
+                  <button type="button" onClick={dismissImportOverlay}>
+                    Continue in background
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <TraceToolbar
             status={status}
-            busy={busy}
+            busy={controlsBusy}
+            importInFlight={importInFlight}
             pauseResumeSupported={pauseResumeSupported}
             rangeSelectionEnabled={rangeSelectionEnabled}
             hasTimeRangeSelection={selectedTimeRange !== null}
@@ -1261,7 +1426,7 @@ export function App(): JSX.Element {
                 return window.tracer.session.save(undefined, { range: selectedTimeRange });
               })
             }
-            onOpen={() => void runAction(() => window.tracer.session.open())}
+            onOpen={handleOpenImport}
             onSettings={() => void openSettings()}
             onToggleRangeSelection={handleToggleRangeSelection}
             onClearRangeSelection={handleClearRangeSelection}
@@ -1346,7 +1511,7 @@ export function App(): JSX.Element {
                     currentFramePayload={currentFramePayload}
                     liveScreenshotSyncEnabled={liveScreenshotSyncEnabled}
                     onToggleLiveScreenshotSync={handleToggleLiveScreenshotSync}
-                    toggleDisabled={busy}
+                    toggleDisabled={controlsBusy}
                   />
                 }
               />

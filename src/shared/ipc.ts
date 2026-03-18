@@ -17,6 +17,7 @@ export interface SessionApi {
   stopCapture(): Promise<SessionStatus>;
   save(path?: string, options?: SaveSessionOptions): Promise<SavedSessionResult>;
   open(path?: string): Promise<SessionStatus>;
+  chooseImportFile(): Promise<string | null>;
   getTimeline(sessionId: string): Promise<CaptureEvent[]>;
   getTimelineDelta(sessionId: string, cursor: number): Promise<TimelineDeltaPayload>;
   getEvent(eventId: string): Promise<CaptureEvent | null>;

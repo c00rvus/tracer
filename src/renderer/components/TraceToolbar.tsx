@@ -3,6 +3,7 @@ import type { SessionStatus } from "../../shared/types";
 interface TraceToolbarProps {
   status: SessionStatus;
   busy: boolean;
+  importInFlight: boolean;
   pauseResumeSupported: boolean;
   rangeSelectionEnabled: boolean;
   hasTimeRangeSelection: boolean;
@@ -23,6 +24,7 @@ interface TraceToolbarProps {
 export function TraceToolbar({
   status,
   busy,
+  importInFlight,
   pauseResumeSupported,
   rangeSelectionEnabled,
   hasTimeRangeSelection,
@@ -111,8 +113,8 @@ export function TraceToolbar({
         >
           Save Range
         </button>
-        <button disabled={busy} onClick={onOpen}>
-          Import
+        <button disabled={busy || importInFlight} onClick={onOpen}>
+          {importInFlight ? "Importing..." : "Import"}
         </button>
         <button disabled={busy} onClick={onSettings}>
           Settings

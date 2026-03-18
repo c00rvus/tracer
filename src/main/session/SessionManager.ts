@@ -79,6 +79,7 @@ const CHROMIUM_SCREENCAST_MAX_HEIGHT = 720;
 const CHROMIUM_SCREENCAST_QUALITY = 80;
 const CHROMIUM_SCREENCAST_FRAME_WAIT_MS = 380;
 const CHROMIUM_SCREENCAST_FIRST_FRAME_WAIT_MS = 900;
+const MAX_CONCURRENT_THUMBNAIL_GENERATIONS = 1;
 const MAX_CAPTURED_BODY_BYTES = 1024 * 1024;
 const CAPTURED_TEXTUAL_MIME_VALUES = new Set([
   "application/graphql-response+json",
@@ -140,8 +141,8 @@ const CURSOR_OVERLAY_INIT_SCRIPT = `
     element.style.background = "rgba(255,255,255,0.92)";
     element.style.border = "1.5px solid rgba(20,23,30,0.95)";
     element.style.boxShadow = "0 0 0 2px rgba(38,132,255,0.25), 0 1px 3px rgba(0,0,0,0.35)";
-    element.style.transform = "translate(-2px, -2px) scale(1)";
-    element.style.transformOrigin = "top left";
+    element.style.transform = "translate(-50%, -50%) scale(1)";
+    element.style.transformOrigin = "center center";
     element.style.pointerEvents = "none";
     element.style.zIndex = "2147483647";
     element.style.opacity = "0";
@@ -188,7 +189,7 @@ const CURSOR_OVERLAY_INIT_SCRIPT = `
     if (!element) {
       return;
     }
-    element.style.transform = "translate(-2px, -2px) scale(0.9)";
+    element.style.transform = "translate(-50%, -50%) scale(0.9)";
   };
 
   const release = () => {
@@ -196,7 +197,7 @@ const CURSOR_OVERLAY_INIT_SCRIPT = `
     if (!element) {
       return;
     }
-    element.style.transform = "translate(-2px, -2px) scale(1)";
+    element.style.transform = "translate(-50%, -50%) scale(1)";
   };
 
   const markScroll = () => {
@@ -271,6 +272,8 @@ export class SessionManager {
   private lastScreenshotEvent: ScreenshotEvent | null = null;
   private screenshotRun: Promise<void> | null = null;
   private thumbnailWritesByPath = new Map<string, Promise<void>>();
+  private thumbnailGenerationActiveCount = 0;
+  private thumbnailGenerationQueue: Array<() => void> = [];
   private screencastActive = false;
   private latestScreencastFrame: ScreencastFrame | null = null;
 
@@ -454,6 +457,7 @@ export class SessionManager {
       this.clearCaptureTimer();
       await this.stopScreencastIfNeeded();
       this.detachCaptureListeners();
+      await this.waitForOngoingScreenshot();
       this.emitLifecycleEvent("capture_paused");
       this.pausedStartedAtMs = Date.now();
       this.status.state = "paused";
@@ -607,6 +611,10 @@ export class SessionManager {
     }
   }
 
+  public async chooseImportFile(): Promise<string | null> {
+    return this.pickOpenPath();
+  }
+
   public async getTimeline(sessionId: string): Promise<CaptureEvent[]> {
     if (this.status.sessionId !== sessionId) {
       return [];
@@ -697,7 +705,9 @@ export class SessionManager {
 
     let writePromise = this.thumbnailWritesByPath.get(existingThumbnailPath);
     if (!writePromise) {
-      writePromise = this.generateThumbnailFile(imagePath, existingThumbnailPath).finally(() => {
+      writePromise = this.runThumbnailGeneration(async () => {
+        await this.generateThumbnailFile(imagePath, existingThumbnailPath);
+      }).finally(() => {
         this.thumbnailWritesByPath.delete(existingThumbnailPath);
       });
       this.thumbnailWritesByPath.set(existingThumbnailPath, writePromise);
@@ -710,6 +720,25 @@ export class SessionManager {
     }
 
     return (await this.pathExists(existingThumbnailPath)) ? existingThumbnailPath : imagePath;
+  }
+
+  private async runThumbnailGeneration<T>(task: () => Promise<T>): Promise<T> {
+    if (this.thumbnailGenerationActiveCount >= MAX_CONCURRENT_THUMBNAIL_GENERATIONS) {
+      await new Promise<void>((resolve) => {
+        this.thumbnailGenerationQueue.push(resolve);
+      });
+    }
+
+    this.thumbnailGenerationActiveCount += 1;
+    try {
+      return await task();
+    } finally {
+      this.thumbnailGenerationActiveCount = Math.max(0, this.thumbnailGenerationActiveCount - 1);
+      const next = this.thumbnailGenerationQueue.shift();
+      if (next) {
+        next();
+      }
+    }
   }
 
   private async generateThumbnailFile(imagePath: string, thumbnailPath: string): Promise<void> {

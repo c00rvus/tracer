@@ -201,6 +201,7 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(IPC_CHANNELS.stopCapture);
   ipcMain.removeHandler(IPC_CHANNELS.save);
   ipcMain.removeHandler(IPC_CHANNELS.open);
+  ipcMain.removeHandler(IPC_CHANNELS.chooseImportFile);
   ipcMain.removeHandler(IPC_CHANNELS.getTimeline);
   ipcMain.removeHandler(IPC_CHANNELS.getTimelineDelta);
   ipcMain.removeHandler(IPC_CHANNELS.getEvent);
@@ -226,6 +227,9 @@ function registerIpcHandlers(): void {
   );
   ipcMain.handle(IPC_CHANNELS.open, async (_event, filePath?: string) =>
     requireSessionManager().open(filePath)
+  );
+  ipcMain.handle(IPC_CHANNELS.chooseImportFile, async () =>
+    requireSessionManager().chooseImportFile()
   );
   ipcMain.handle(IPC_CHANNELS.getTimeline, async (_event, sessionId: string) =>
     requireSessionManager().getTimeline(sessionId)

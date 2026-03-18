@@ -1,6 +1,6 @@
 {
   "name": "tracer-desktop",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "description": "Desktop app for Chromium session capture with DevTools timeline",
   "main": "dist/main/main.js",
   "author": "Tracer",

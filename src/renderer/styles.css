@@ -290,6 +290,68 @@ button:disabled {
   pointer-events: auto;
 }
 
+.import-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(10, 12, 17, 0.58);
+}
+
+.import-loading-dialog {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 20px;
+  border: 1px solid #384050;
+  background: linear-gradient(180deg, #1b1e25 0%, #171a21 100%);
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.38);
+  text-align: center;
+}
+
+.import-loading-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.import-loading-dialog p {
+  margin: 0;
+  color: #c2c8d3;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.import-loading-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid rgba(111, 130, 162, 0.28);
+  border-top-color: #76a7ff;
+  border-radius: 50%;
+  animation: tracer-import-spin 0.9s linear infinite;
+}
+
+.import-loading-actions {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  margin-top: 4px;
+}
+
+@keyframes tracer-import-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .banner-close {
   width: 18px;
   height: 18px;

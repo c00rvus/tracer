@@ -6,6 +6,7 @@ export const IPC_CHANNELS = {
   stopCapture: "session.stopCapture",
   save: "session.save",
   open: "session.open",
+  chooseImportFile: "session.chooseImportFile",
   getTimeline: "session.getTimeline",
   getTimelineDelta: "session.getTimelineDelta",
   getEvent: "session.getEvent",
