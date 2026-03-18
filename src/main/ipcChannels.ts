@@ -7,6 +7,8 @@ export const IPC_CHANNELS = {
   save: "session.save",
   open: "session.open",
   chooseImportFile: "session.chooseImportFile",
+  chooseVideoExportPath: "session.chooseVideoExportPath",
+  exportVideo: "session.exportVideo",
   getTimeline: "session.getTimeline",
   getTimelineDelta: "session.getTimelineDelta",
   getEvent: "session.getEvent",

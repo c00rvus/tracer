@@ -75,6 +75,8 @@ const MAX_TIMELINE_THUMBNAIL_CACHE = 240;
 const MAX_FULL_SCREENSHOT_CACHE = 10;
 const IMPORT_LOADING_DELAY_MS = 250;
 const IMPORT_STALL_TIMEOUT_MS = 15000;
+const VIDEO_EXPORT_LOADING_DELAY_MS = 250;
+const VIDEO_EXPORT_STALL_TIMEOUT_MS = 15000;
 const LONG_CAPTURE_WARNING_MESSAGE =
   "This session has been recording for a long time. Make sure you don't leave capture running unintentionally.";
 const LONG_CAPTURE_WARNING_TITLE = "Long recording reminder";
@@ -213,6 +215,8 @@ export function App(): JSX.Element {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [importState, setImportState] = useState<"idle" | "pending" | "stalled">("idle");
   const [importOverlayVisible, setImportOverlayVisible] = useState(false);
+  const [videoExportState, setVideoExportState] = useState<"idle" | "pending" | "stalled">("idle");
+  const [videoExportOverlayVisible, setVideoExportOverlayVisible] = useState(false);
   const [screenshotById, setScreenshotById] = useState<Record<string, ScreenshotPayload>>({});
   const [fullScreenshotById, setFullScreenshotById] = useState<Record<string, ScreenshotPayload>>({});
   const [visibleTimelineScreenshotIds, setVisibleTimelineScreenshotIds] = useState<string[]>([]);
@@ -256,6 +260,10 @@ export function App(): JSX.Element {
   const importRequestIdRef = useRef(0);
   const importOverlayDelayTimerRef = useRef<number | null>(null);
   const importStallTimerRef = useRef<number | null>(null);
+  const videoExportStateRef = useRef<"idle" | "pending" | "stalled">("idle");
+  const videoExportRequestIdRef = useRef(0);
+  const videoExportOverlayDelayTimerRef = useRef<number | null>(null);
+  const videoExportStallTimerRef = useRef<number | null>(null);
   const timelineCursorRef = useRef(0);
   const timelineSessionKeyRef = useRef<string | null>(null);
   const longCaptureWarningStateRef = useRef<{ key: string | null; lastReminderSlot: number }>({
@@ -280,6 +288,22 @@ export function App(): JSX.Element {
     if (importStallTimerRef.current !== null) {
       window.clearTimeout(importStallTimerRef.current);
       importStallTimerRef.current = null;
+    }
+  }, []);
+
+  const setVideoExportPhase = useCallback((phase: "idle" | "pending" | "stalled") => {
+    videoExportStateRef.current = phase;
+    setVideoExportState(phase);
+  }, []);
+
+  const clearVideoExportTimers = useCallback(() => {
+    if (videoExportOverlayDelayTimerRef.current !== null) {
+      window.clearTimeout(videoExportOverlayDelayTimerRef.current);
+      videoExportOverlayDelayTimerRef.current = null;
+    }
+    if (videoExportStallTimerRef.current !== null) {
+      window.clearTimeout(videoExportStallTimerRef.current);
+      videoExportStallTimerRef.current = null;
     }
   }, []);
 
@@ -388,8 +412,9 @@ export function App(): JSX.Element {
   useEffect(() => {
     return () => {
       clearImportTimers();
+      clearVideoExportTimers();
     };
-  }, [clearImportTimers]);
+  }, [clearImportTimers, clearVideoExportTimers]);
 
   useEffect(() => {
     if (!isWindows) {
@@ -884,6 +909,10 @@ export function App(): JSX.Element {
     setImportOverlayVisible(false);
   }, []);
 
+  const dismissVideoExportOverlay = useCallback(() => {
+    setVideoExportOverlayVisible(false);
+  }, []);
+
   const handleOpenImport = useCallback(() => {
     if (busy || importStateRef.current !== "idle") {
       return;
@@ -980,6 +1009,105 @@ export function App(): JSX.Element {
         }
       });
   }, [busy, clearImportTimers, refresh, setImportPhase]);
+
+  const handleExportVideo = useCallback(
+    (range?: { startMs: number; endMs: number } | null) => {
+      if (busy || importStateRef.current !== "idle" || videoExportStateRef.current !== "idle") {
+        return;
+      }
+
+      setBusy(true);
+      setErrorMessage(null);
+      dismissedStatusErrorRef.current = null;
+      clearVideoExportTimers();
+      setVideoExportOverlayVisible(false);
+
+      void window.tracer.session
+        .chooseVideoExportPath(range ?? null)
+        .then((selectedFilePath) => {
+          setBusy(false);
+          if (!selectedFilePath) {
+            return;
+          }
+
+          setVideoExportPhase("pending");
+          const requestId = videoExportRequestIdRef.current + 1;
+          videoExportRequestIdRef.current = requestId;
+
+          videoExportOverlayDelayTimerRef.current = window.setTimeout(() => {
+            if (
+              videoExportRequestIdRef.current !== requestId ||
+              videoExportStateRef.current === "idle"
+            ) {
+              return;
+            }
+            setVideoExportOverlayVisible(true);
+          }, VIDEO_EXPORT_LOADING_DELAY_MS);
+
+          videoExportStallTimerRef.current = window.setTimeout(() => {
+            if (
+              videoExportRequestIdRef.current !== requestId ||
+              videoExportStateRef.current !== "pending"
+            ) {
+              return;
+            }
+            setVideoExportPhase("stalled");
+            setVideoExportOverlayVisible(true);
+          }, VIDEO_EXPORT_STALL_TIMEOUT_MS);
+
+          const finishExport = async (
+            outcome:
+              | { type: "success"; wasStalled: boolean }
+              | { type: "error"; message: string }
+          ): Promise<void> => {
+            if (videoExportRequestIdRef.current !== requestId) {
+              return;
+            }
+
+            clearVideoExportTimers();
+            setVideoExportPhase("idle");
+            setVideoExportOverlayVisible(false);
+
+            if (outcome.type === "success") {
+              setSettingsNotice(
+                outcome.wasStalled ? "Video export completed." : "Video exported successfully."
+              );
+              return;
+            }
+
+            if (!isUserCanceledMessage(outcome.message)) {
+              setErrorMessage(outcome.message);
+            }
+          };
+
+          void window.tracer.session
+            .exportVideo(selectedFilePath, { range: range ?? null })
+            .then(async () => {
+              await finishExport({
+                type: "success",
+                wasStalled: videoExportStateRef.current === "stalled"
+              });
+            })
+            .catch(async (error) => {
+              const message = error instanceof Error ? error.message : "Unexpected error.";
+              await finishExport({
+                type: "error",
+                message
+              });
+            });
+        })
+        .catch((error) => {
+          setBusy(false);
+          setVideoExportPhase("idle");
+          setVideoExportOverlayVisible(false);
+          const message = error instanceof Error ? error.message : "Failed to choose video export path.";
+          if (!isUserCanceledMessage(message)) {
+            setErrorMessage(message);
+          }
+        });
+    },
+    [busy, clearVideoExportTimers, setVideoExportPhase]
+  );
 
   const openSettings = useCallback(async () => {
     try {
@@ -1227,7 +1355,8 @@ export function App(): JSX.Element {
   }, []);
 
   const importInFlight = importState !== "idle";
-  const controlsBusy = busy || importInFlight;
+  const videoExportInFlight = videoExportState !== "idle";
+  const controlsBusy = busy || importInFlight || videoExportInFlight;
   const actionsLiveLogsFollowEnabled = actionsLiveHoverSyncEnabled && status.state === "capturing";
   const actionsLiveHoverTimelineEnabled = actionsLiveHoverSyncEnabled && status.state !== "capturing";
   const combinedLiveAutoScrollEnabled =
@@ -1383,10 +1512,45 @@ export function App(): JSX.Element {
           </div>
         )}
 
+        {videoExportOverlayVisible && (
+          <div
+            className="import-loading-overlay"
+            role="status"
+            aria-live="polite"
+            aria-busy={videoExportState === "pending"}
+          >
+            <div className="import-loading-dialog">
+              <div className="import-loading-spinner" aria-hidden />
+              <h2>Exporting video...</h2>
+              {videoExportState === "pending" ? (
+                <p>
+                  Tracer is assembling the captured screenshots into an MP4. This can take longer
+                  on large sessions or ranges with many frames. Keep this window open until the
+                  export finishes.
+                </p>
+              ) : (
+                <p>
+                  The video is still being rendered. You can close this dialog and continue using
+                  the app while the export finishes in the background. A confirmation message will
+                  appear when it is done.
+                </p>
+              )}
+              {videoExportState === "stalled" && (
+                <div className="import-loading-actions">
+                  <button type="button" onClick={dismissVideoExportOverlay}>
+                    Continue in background
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <TraceToolbar
             status={status}
             busy={controlsBusy}
             importInFlight={importInFlight}
+            videoExportInFlight={videoExportInFlight}
             pauseResumeSupported={pauseResumeSupported}
             rangeSelectionEnabled={rangeSelectionEnabled}
             hasTimeRangeSelection={selectedTimeRange !== null}
@@ -1426,6 +1590,14 @@ export function App(): JSX.Element {
                 return window.tracer.session.save(undefined, { range: selectedTimeRange });
               })
             }
+            onExportVideo={() => handleExportVideo(null)}
+            onExportRangeVideo={() => {
+              if (!selectedTimeRange) {
+                setErrorMessage("No range selected.");
+                return;
+              }
+              handleExportVideo(selectedTimeRange);
+            }}
             onOpen={handleOpenImport}
             onSettings={() => void openSettings()}
             onToggleRangeSelection={handleToggleRangeSelection}

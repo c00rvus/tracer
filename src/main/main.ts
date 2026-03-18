@@ -11,7 +11,7 @@ import {
   type NativeImage
 } from "electron";
 import log from "electron-log";
-import type { AppSettings, SaveSessionOptions } from "../shared/types";
+import type { AppSettings, ExportVideoOptions, SaveSessionOptions, SessionExportRange } from "../shared/types";
 import { IPC_CHANNELS } from "./ipcChannels";
 import { SettingsStore } from "./settings/SettingsStore";
 import { SessionManager } from "./session/SessionManager";
@@ -202,6 +202,8 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(IPC_CHANNELS.save);
   ipcMain.removeHandler(IPC_CHANNELS.open);
   ipcMain.removeHandler(IPC_CHANNELS.chooseImportFile);
+  ipcMain.removeHandler(IPC_CHANNELS.chooseVideoExportPath);
+  ipcMain.removeHandler(IPC_CHANNELS.exportVideo);
   ipcMain.removeHandler(IPC_CHANNELS.getTimeline);
   ipcMain.removeHandler(IPC_CHANNELS.getTimelineDelta);
   ipcMain.removeHandler(IPC_CHANNELS.getEvent);
@@ -230,6 +232,16 @@ function registerIpcHandlers(): void {
   );
   ipcMain.handle(IPC_CHANNELS.chooseImportFile, async () =>
     requireSessionManager().chooseImportFile()
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.chooseVideoExportPath,
+    async (_event, range?: SessionExportRange | null) =>
+      requireSessionManager().chooseVideoExportPath(range)
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.exportVideo,
+    async (_event, filePath: string, options?: ExportVideoOptions) =>
+      requireSessionManager().exportVideo(filePath, options)
   );
   ipcMain.handle(IPC_CHANNELS.getTimeline, async (_event, sessionId: string) =>
     requireSessionManager().getTimeline(sessionId)

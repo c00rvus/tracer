@@ -13,6 +13,10 @@ const api: TracerApi = {
       ipcRenderer.invoke(IPC_CHANNELS.save, filePath, options),
     open: (filePath?: string) => ipcRenderer.invoke(IPC_CHANNELS.open, filePath),
     chooseImportFile: () => ipcRenderer.invoke(IPC_CHANNELS.chooseImportFile),
+    chooseVideoExportPath: (range?: { startMs: number; endMs: number } | null) =>
+      ipcRenderer.invoke(IPC_CHANNELS.chooseVideoExportPath, range),
+    exportVideo: (filePath: string, options?: { range?: { startMs: number; endMs: number } | null }) =>
+      ipcRenderer.invoke(IPC_CHANNELS.exportVideo, filePath, options),
     getTimeline: (sessionId: string) => ipcRenderer.invoke(IPC_CHANNELS.getTimeline, sessionId),
     getTimelineDelta: (sessionId: string, cursor: number) =>
       ipcRenderer.invoke(IPC_CHANNELS.getTimelineDelta, sessionId, cursor),

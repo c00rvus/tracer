@@ -129,6 +129,17 @@ export interface SaveSessionOptions {
   range?: SessionExportRange | null;
 }
 
+export interface ExportVideoOptions {
+  range?: SessionExportRange | null;
+}
+
+export interface ExportedVideoResult {
+  path: string;
+  sessionId: string;
+  frameCount: number;
+  durationMs: number;
+}
+
 export interface TimelineDeltaPayload {
   reset: boolean;
   nextCursor: number;

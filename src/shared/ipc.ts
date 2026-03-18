@@ -1,11 +1,14 @@
 import type {
   AppSettings,
   CaptureEvent,
+  ExportedVideoResult,
+  ExportVideoOptions,
   NetworkBodyPayload,
   SaveSessionOptions,
   SavedSessionResult,
   ScreenshotPayload,
   SessionStatus,
+  SessionExportRange,
   TimelineDeltaPayload
 } from "./types";
 
@@ -18,6 +21,8 @@ export interface SessionApi {
   save(path?: string, options?: SaveSessionOptions): Promise<SavedSessionResult>;
   open(path?: string): Promise<SessionStatus>;
   chooseImportFile(): Promise<string | null>;
+  chooseVideoExportPath(range?: SessionExportRange | null): Promise<string | null>;
+  exportVideo(path: string, options?: ExportVideoOptions): Promise<ExportedVideoResult>;
   getTimeline(sessionId: string): Promise<CaptureEvent[]>;
   getTimelineDelta(sessionId: string, cursor: number): Promise<TimelineDeltaPayload>;
   getEvent(eventId: string): Promise<CaptureEvent | null>;

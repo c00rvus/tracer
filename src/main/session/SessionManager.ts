@@ -14,6 +14,8 @@ import type {
   AppSettings,
   CaptureEvent,
   ConsoleEvent,
+  ExportedVideoResult,
+  ExportVideoOptions,
   LifecycleEvent,
   NetworkFailEvent,
   NetworkBodyPayload,
@@ -39,6 +41,7 @@ import {
   writeEventsNdjsonFile
 } from "./utils";
 import { createSessionArchive, extractSessionArchive } from "./archive";
+import { exportSessionVideo } from "../video/exportSessionVideo";
 
 interface PendingResponse {
   requestId: string;
@@ -613,6 +616,52 @@ export class SessionManager {
 
   public async chooseImportFile(): Promise<string | null> {
     return this.pickOpenPath();
+  }
+
+  public async chooseVideoExportPath(
+    range?: ExportVideoOptions["range"]
+  ): Promise<string | null> {
+    this.ensureVideoExportReady();
+    const exportRange = this.normalizeExportRange(this.getOrderedEvents(), range);
+    return this.pickVideoSavePath(exportRange);
+  }
+
+  public async exportVideo(
+    filePath?: string,
+    options?: ExportVideoOptions
+  ): Promise<ExportedVideoResult> {
+    try {
+      this.ensureVideoExportReady();
+      if (!this.status.sessionId || !this.sessionRoot) {
+        throw new Error("No session is available for video export.");
+      }
+
+      const sortedEvents = this.getOrderedEvents();
+      const exportRange = this.normalizeExportRange(sortedEvents, options?.range ?? null);
+      const outputPath =
+        filePath ?? (await this.pickVideoSavePath(exportRange));
+      if (!outputPath) {
+        throw new Error("Video export canceled by user.");
+      }
+
+      return await exportSessionVideo({
+        events: sortedEvents,
+        outputPath,
+        tempRoot: app.getPath("temp"),
+        sessionId: this.status.sessionId,
+        range: exportRange,
+        resolveScreenshotPath: (relativePath) => {
+          const safeRelativePath = this.toSafeRelativePath(relativePath);
+          if (!safeRelativePath || !this.sessionRoot) {
+            throw new Error("Invalid screenshot path in session data.");
+          }
+          return path.join(this.sessionRoot, safeRelativePath);
+        }
+      });
+    } catch (error) {
+      this.recordError(error, "Failed to export session video.");
+      throw error;
+    }
   }
 
   public async getTimeline(sessionId: string): Promise<CaptureEvent[]> {
@@ -2093,6 +2142,25 @@ export class SessionManager {
     return filePath;
   }
 
+  private async pickVideoSavePath(
+    range?: { startMs: number; endMs: number } | null
+  ): Promise<string | null> {
+    const saveDir = this.captureSettings.defaultSessionSaveDir.trim() || app.getPath("documents");
+    const suffix = range
+      ? `-video-range-${Math.round(range.startMs)}ms-${Math.round(range.endMs)}ms`
+      : "-video";
+    const defaultPath = path.join(saveDir, this.buildVideoFileName(suffix));
+    const result = await dialog.showSaveDialog({
+      title: "Export Tracer Video",
+      defaultPath,
+      filters: [{ name: "MP4 Video", extensions: ["mp4"] }]
+    });
+    if (result.canceled || !result.filePath) {
+      return null;
+    }
+    return result.filePath.endsWith(".mp4") ? result.filePath : `${result.filePath}.mp4`;
+  }
+
   private toSessionRelativePath(filePath: string): string {
     if (!this.sessionRoot) {
       return filePath;
@@ -2103,6 +2171,23 @@ export class SessionManager {
   private buildArchiveFileName(suffix = ""): string {
     const timestampMs = this.status.captureStartedAt ?? this.status.createdAt ?? Date.now();
     return `${this.formatTimestampForFilename(timestampMs)}${suffix}.zip`;
+  }
+
+  private buildVideoFileName(suffix = ""): string {
+    const timestampMs = this.status.captureStartedAt ?? this.status.createdAt ?? Date.now();
+    return `${this.formatTimestampForFilename(timestampMs)}${suffix}.mp4`;
+  }
+
+  private ensureVideoExportReady(): void {
+    if (!this.status.sessionId || !this.sessionRoot) {
+      throw new Error("No session is available for video export.");
+    }
+    if (this.status.state === "capturing" || this.status.state === "paused") {
+      throw new Error("Stop capture before exporting video.");
+    }
+    if (this.status.state === "browser_ready") {
+      throw new Error("Capture has not started yet.");
+    }
   }
 
   private sortEvents(events: CaptureEvent[]): CaptureEvent[] {

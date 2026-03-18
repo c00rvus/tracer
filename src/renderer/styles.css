@@ -229,21 +229,62 @@ select {
   justify-content: flex-end;
 }
 
+.toolbar-menu {
+  position: relative;
+}
+
+.toolbar-menu-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbar-menu-caret {
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.toolbar-menu-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  min-width: 176px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border: none;
+  background: #1c1f26;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.32);
+}
+
+.toolbar-menu-popover-right {
+  left: auto;
+  right: 0;
+}
+
+.toolbar-menu-popover button {
+  width: 100%;
+  text-align: left;
+}
+
 button {
-  border: 1px solid #454a56;
-  background: #2a2d34;
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--text);
   padding: 6px 10px;
   cursor: pointer;
 }
 
 button:hover:not(:disabled) {
-  border-color: #666e7e;
+  background: rgba(255, 255, 255, 0.06);
 }
 
 button.toggle-active {
-  border-color: #4f9dff;
-  background: rgba(42, 88, 153, 0.35);
+  background: rgba(79, 157, 255, 0.18);
+  color: #d9e9ff;
 }
 
 button:disabled {
