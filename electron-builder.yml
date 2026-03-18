@@ -18,6 +18,8 @@ win:
 mac:
   icon: build/icon.icns
   category: public.app-category.developer-tools
+  signIgnore:
+    - "node_modules/playwright-core/\\.local-browsers"
   target:
     - dmg
     - zip
