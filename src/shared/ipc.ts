@@ -5,7 +5,8 @@ import type {
   SaveSessionOptions,
   SavedSessionResult,
   ScreenshotPayload,
-  SessionStatus
+  SessionStatus,
+  TimelineDeltaPayload
 } from "./types";
 
 export interface SessionApi {
@@ -17,6 +18,7 @@ export interface SessionApi {
   save(path?: string, options?: SaveSessionOptions): Promise<SavedSessionResult>;
   open(path?: string): Promise<SessionStatus>;
   getTimeline(sessionId: string): Promise<CaptureEvent[]>;
+  getTimelineDelta(sessionId: string, cursor: number): Promise<TimelineDeltaPayload>;
   getEvent(eventId: string): Promise<CaptureEvent | null>;
   getScreenshot(
     screenshotId: string,

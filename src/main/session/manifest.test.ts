@@ -44,4 +44,26 @@ describe("manifest", () => {
     const parsed = parseManifest(raw);
     expect(parsed.sessionId).toBe("session-2");
   });
+
+  it("parses manifest with utf8 bom", () => {
+    const raw = `\uFEFF${JSON.stringify({
+      sessionId: "session-3",
+      createdAt: 200,
+      browserVersion: "x",
+      appVersion: "y",
+      captureStartedAt: null,
+      captureEndedAt: null,
+      counts: {
+        events: 0,
+        screenshots: 0,
+        networkRequests: 0
+      },
+      flags: {
+        containsBodies: false
+      }
+    })}`;
+
+    const parsed = parseManifest(raw);
+    expect(parsed.sessionId).toBe("session-3");
+  });
 });

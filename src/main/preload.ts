@@ -13,6 +13,8 @@ const api: TracerApi = {
       ipcRenderer.invoke(IPC_CHANNELS.save, filePath, options),
     open: (filePath?: string) => ipcRenderer.invoke(IPC_CHANNELS.open, filePath),
     getTimeline: (sessionId: string) => ipcRenderer.invoke(IPC_CHANNELS.getTimeline, sessionId),
+    getTimelineDelta: (sessionId: string, cursor: number) =>
+      ipcRenderer.invoke(IPC_CHANNELS.getTimelineDelta, sessionId, cursor),
     getEvent: (eventId: string) => ipcRenderer.invoke(IPC_CHANNELS.getEvent, eventId),
     getScreenshot: (screenshotId: string, variant?: "thumbnail" | "full") =>
       ipcRenderer.invoke(IPC_CHANNELS.getScreenshot, screenshotId, variant),

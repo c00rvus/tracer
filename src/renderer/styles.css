@@ -523,6 +523,7 @@ button:disabled {
   max-width: 260px;
   flex: 0 1 180px;
   align-self: stretch;
+  z-index: 5;
 }
 
 .actions-filter-dropdown-advanced {
@@ -570,13 +571,17 @@ button:disabled {
   border-color: #666e7e;
 }
 
+.actions-filter-dropdown[open] {
+  z-index: 40;
+}
+
 .actions-filter-menu {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
   min-width: 220px;
   max-width: 280px;
-  z-index: 120;
+  z-index: 400;
   border: 1px solid #3f444f;
   background: #191d25;
   padding: 8px 10px;
@@ -587,9 +592,9 @@ button:disabled {
 }
 
 .actions-advanced-filter-menu {
-  left: auto;
-  right: 0;
-  min-width: 320px;
+  left: 0;
+  right: auto;
+  min-width: min(320px, calc(100vw - 48px));
   width: min(560px, calc(100vw - 36px));
   max-width: min(560px, calc(100vw - 36px));
   gap: 10px;
@@ -1283,6 +1288,19 @@ body.resizing-vertical .preview-main-shot::after {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  position: relative;
+}
+
+/* Let Actions filter menus overlay adjacent panes when the left split is narrow/short. */
+.workspace-split > .resizable-pane.primary,
+.trace-main-split > .resizable-pane.primary {
+  overflow: visible;
+  z-index: 10;
+}
+
+.workspace-split > .resizable-pane.secondary,
+.trace-main-split > .resizable-pane.secondary {
+  z-index: 1;
 }
 
 .trace-main-split .resizable-pane {
@@ -1299,7 +1317,7 @@ body.resizing-vertical .preview-main-shot::after {
 .resizable-handle {
   position: relative;
   background: #2a2e36;
-  z-index: 3;
+  z-index: 2;
 }
 
 .resizable-handle::after {

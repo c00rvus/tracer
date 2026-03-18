@@ -129,6 +129,12 @@ export interface SaveSessionOptions {
   range?: SessionExportRange | null;
 }
 
+export interface TimelineDeltaPayload {
+  reset: boolean;
+  nextCursor: number;
+  events: CaptureEvent[];
+}
+
 export interface ScreenshotPayload {
   screenshotId: string;
   path: string;

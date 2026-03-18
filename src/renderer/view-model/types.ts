@@ -7,6 +7,7 @@ export interface EventRowViewModel {
   badge: string;
   title: string;
   subtitle: string;
+  searchText: string;
   deltaMs: number;
   durationMs: number;
   relMs: number;

@@ -1,4 +1,5 @@
 import type { SessionManifest, SessionStatus } from "../../shared/types";
+import { stripUtf8Bom } from "./utils";
 
 interface BuildManifestInput {
   sessionId: string;
@@ -31,7 +32,7 @@ export function buildManifest(input: BuildManifestInput): SessionManifest {
 }
 
 export function parseManifest(raw: string): SessionManifest {
-  const parsed = JSON.parse(raw) as Partial<SessionManifest>;
+  const parsed = JSON.parse(stripUtf8Bom(raw)) as Partial<SessionManifest>;
   if (!parsed.sessionId || typeof parsed.createdAt !== "number") {
     throw new Error("Invalid session manifest.");
   }

@@ -40,7 +40,7 @@ export async function createSessionArchive({
 }: CreateArchiveInput): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const output = createWriteStream(destinationZipPath);
-    const archive = archiver("zip", { zlib: { level: 9 } });
+    const archive = archiver("zip", { zlib: { level: 6 } });
 
     output.on("close", () => resolve());
     output.on("error", (error) => reject(error));

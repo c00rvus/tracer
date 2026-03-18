@@ -24,7 +24,8 @@ import type {
   ScreenshotEvent,
   ScreenshotPayload,
   SessionManifest,
-  SessionStatus
+  SessionStatus,
+  TimelineDeltaPayload
 } from "../../shared/types";
 import { normalizeAppSettings } from "../../shared/settings";
 import { createBaseEvent, normalizeConsoleLevel } from "./eventFactory";
@@ -34,7 +35,8 @@ import {
   parseEventsNdjsonFile,
   sanitizeFileFragment,
   serializeEventLine,
-  toPosixPath
+  toPosixPath,
+  writeEventsNdjsonFile
 } from "./utils";
 import { createSessionArchive, extractSessionArchive } from "./archive";
 
@@ -77,6 +79,26 @@ const CHROMIUM_SCREENCAST_MAX_HEIGHT = 720;
 const CHROMIUM_SCREENCAST_QUALITY = 80;
 const CHROMIUM_SCREENCAST_FRAME_WAIT_MS = 380;
 const CHROMIUM_SCREENCAST_FIRST_FRAME_WAIT_MS = 900;
+const MAX_CAPTURED_BODY_BYTES = 1024 * 1024;
+const CAPTURED_TEXTUAL_MIME_VALUES = new Set([
+  "application/graphql-response+json",
+  "application/javascript",
+  "application/json",
+  "application/ld+json",
+  "application/problem+json",
+  "application/vnd.api+json",
+  "application/x-javascript",
+  "application/xml",
+  "application/xhtml+xml"
+]);
+const SKIPPED_BODY_MIME_PREFIXES = ["audio/", "font/", "image/", "video/"];
+const SKIPPED_BODY_MIME_VALUES = new Set([
+  "application/octet-stream",
+  "application/pdf",
+  "application/wasm",
+  "application/x-binary",
+  "application/zip"
+]);
 const CURSOR_OVERLAY_INIT_SCRIPT = `
 (() => {
   const globalState = globalThis;
@@ -256,6 +278,7 @@ export class SessionManager {
   private requestUrlById = new Map<string, string>();
   private pausedStartedAtMs: number | null = null;
   private pausedAccumulatedMs = 0;
+  private timelineOrderDirty = false;
 
   private status: SessionStatus = JSON.parse(JSON.stringify(STATUS_TEMPLATE)) as SessionStatus;
   private containsBodies = false;
@@ -495,7 +518,10 @@ export class SessionManager {
       }
 
       await this.writeSessionMetadata();
-      const exportRange = this.normalizeExportRange(this.sortEvents(this.events), options?.range ?? null);
+      const exportRange = this.normalizeExportRange(
+        this.getOrderedEvents(),
+        options?.range ?? null
+      );
       const outputPath = filePath ?? (await this.pickSavePath(exportRange));
       await ensureDir(path.dirname(outputPath));
 
@@ -556,6 +582,7 @@ export class SessionManager {
       this.containsBodies = manifest.flags.containsBodies;
 
       this.events = this.sortEvents(events);
+      this.timelineOrderDirty = false;
       this.eventById.clear();
       this.screenshotPathById.clear();
       this.screenshotThumbnailPathById.clear();
@@ -584,7 +611,38 @@ export class SessionManager {
     if (this.status.sessionId !== sessionId) {
       return [];
     }
-    return this.sortEvents(this.events);
+    return this.getOrderedEvents().slice();
+  }
+
+  public async getTimelineDelta(
+    sessionId: string,
+    cursor: number
+  ): Promise<TimelineDeltaPayload> {
+    if (this.status.sessionId !== sessionId) {
+      return {
+        reset: true,
+        nextCursor: 0,
+        events: []
+      };
+    }
+
+    const orderedEvents = this.getOrderedEvents();
+    const normalizedCursor =
+      Number.isInteger(cursor) && Number.isFinite(cursor) && cursor >= 0 ? cursor : 0;
+
+    if (normalizedCursor === 0 || normalizedCursor > orderedEvents.length) {
+      return {
+        reset: true,
+        nextCursor: orderedEvents.length,
+        events: orderedEvents.slice()
+      };
+    }
+
+    return {
+      reset: false,
+      nextCursor: orderedEvents.length,
+      events: orderedEvents.slice(normalizedCursor)
+    };
   }
 
   public async getEvent(eventId: string): Promise<CaptureEvent | null> {
@@ -753,6 +811,7 @@ export class SessionManager {
 
     this.sessionRoot = root;
     this.events = [];
+    this.timelineOrderDirty = false;
     this.eventById.clear();
     this.screenshotPathById.clear();
     this.screenshotThumbnailPathById.clear();
@@ -892,6 +951,15 @@ export class SessionManager {
   }
 
   private appendEvent(event: CaptureEvent): void {
+    const previousLastEvent = this.events[this.events.length - 1];
+    if (
+      previousLastEvent &&
+      (event.tsMs < previousLastEvent.tsMs ||
+        (event.tsMs === previousLastEvent.tsMs && event.tRelMs < previousLastEvent.tRelMs))
+    ) {
+      this.timelineOrderDirty = true;
+    }
+
     this.events.push(event);
     this.eventById.set(event.id, event);
 
@@ -1027,7 +1095,7 @@ export class SessionManager {
     }
 
     let bodyPath: string | undefined;
-    if (this.cdp) {
+    if (this.cdp && this.shouldCaptureResponseBody(response)) {
       try {
         const responseBody = await this.cdp.send("Network.getResponseBody", {
           requestId: params.requestId
@@ -1289,9 +1357,6 @@ export class SessionManager {
     };
 
     this.appendEvent(event);
-    void this.ensureThumbnailForScreenshot(screenshotId).catch((error) => {
-      log.warn("Failed to pre-generate screenshot thumbnail.", error);
-    });
     return true;
   }
 
@@ -1398,9 +1463,6 @@ export class SessionManager {
       reason
     };
     this.appendEvent(event);
-    void this.ensureThumbnailForScreenshot(screenshotId).catch((error) => {
-      log.warn("Failed to pre-generate screenshot thumbnail.", error);
-    });
   }
 
   private async captureScreenshotWithRetry(
@@ -1618,6 +1680,7 @@ export class SessionManager {
     this.cdp = null;
 
     this.events = [];
+    this.timelineOrderDirty = false;
     this.eventById.clear();
     this.screenshotPathById.clear();
     this.screenshotThumbnailPathById.clear();
@@ -1733,7 +1796,7 @@ export class SessionManager {
       throw new Error("Session root is not available for range export.");
     }
 
-    const filteredEvents = this.sortEvents(this.events).filter((event) => {
+    const filteredEvents = this.getOrderedEvents().filter((event) => {
       return event.tRelMs >= range.startMs && event.tRelMs <= range.endMs;
     });
     if (filteredEvents.length === 0) {
@@ -1745,8 +1808,7 @@ export class SessionManager {
 
     try {
       await this.copyRangeAssets(filteredEvents, exportRoot);
-      const ndjson = filteredEvents.map((event) => serializeEventLine(event)).join("");
-      await writeFile(path.join(exportRoot, "events.ndjson"), ndjson, "utf8");
+      await writeEventsNdjsonFile(path.join(exportRoot, "events.ndjson"), filteredEvents);
       await this.writeRangeSessionMetadata(exportRoot, filteredEvents);
       await this.writeVersionFileForRoot(exportRoot);
       await createSessionArchive({
@@ -1767,14 +1829,6 @@ export class SessionManager {
     for (const event of events) {
       if (event.kind === "screenshot") {
         assets.add(event.path);
-        const fullPath = this.screenshotPathById.get(event.screenshotId);
-        const thumbnailPath = this.screenshotThumbnailPathById.get(event.screenshotId);
-        if (fullPath && thumbnailPath) {
-          const thumbnailRel = this.toSessionRelativePath(thumbnailPath);
-          if (thumbnailRel) {
-            assets.add(thumbnailRel);
-          }
-        }
       }
       if (event.kind === "network_response" && event.bodyPath) {
         assets.add(event.bodyPath);
@@ -1802,7 +1856,7 @@ export class SessionManager {
       throw new Error("Session metadata is unavailable for range export.");
     }
 
-    const sorted = this.sortEvents(events);
+    const sorted = events;
     const firstEvent = sorted[0];
     const lastEvent = sorted[sorted.length - 1];
     const containsBodies = sorted.some((event) => event.kind === "network_response" && Boolean(event.bodyPath));
@@ -1859,6 +1913,74 @@ export class SessionManager {
       return null;
     }
     return normalized;
+  }
+
+  private getOrderedEvents(): CaptureEvent[] {
+    if (this.timelineOrderDirty) {
+      this.events.sort((a, b) => {
+        if (a.tsMs !== b.tsMs) {
+          return a.tsMs - b.tsMs;
+        }
+        if (a.tRelMs !== b.tRelMs) {
+          return a.tRelMs - b.tRelMs;
+        }
+        return a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: "base" });
+      });
+      this.timelineOrderDirty = false;
+    }
+    return this.events;
+  }
+
+  private shouldCaptureResponseBody(response: PendingResponse): boolean {
+    const mimeType = this.normalizeMimeType(
+      response.mimeType ?? this.getHeaderValue(response.headers, "content-type")
+    );
+    if (mimeType) {
+      if (SKIPPED_BODY_MIME_VALUES.has(mimeType)) {
+        return false;
+      }
+      if (SKIPPED_BODY_MIME_PREFIXES.some((prefix) => mimeType.startsWith(prefix))) {
+        return false;
+      }
+    }
+
+    const contentLength = this.parseHeaderNumber(response.headers, "content-length");
+    if (contentLength !== null && contentLength > MAX_CAPTURED_BODY_BYTES) {
+      return false;
+    }
+
+    if (!mimeType) {
+      return contentLength === null || contentLength <= MAX_CAPTURED_BODY_BYTES;
+    }
+
+    return mimeType.startsWith("text/") || CAPTURED_TEXTUAL_MIME_VALUES.has(mimeType);
+  }
+
+  private getHeaderValue(headers: Record<string, string>, headerName: string): string | undefined {
+    const expectedName = headerName.toLowerCase();
+    for (const [name, value] of Object.entries(headers)) {
+      if (name.toLowerCase() === expectedName) {
+        return value;
+      }
+    }
+    return undefined;
+  }
+
+  private parseHeaderNumber(headers: Record<string, string>, headerName: string): number | null {
+    const rawValue = this.getHeaderValue(headers, headerName);
+    if (!rawValue) {
+      return null;
+    }
+    const parsedValue = Number.parseInt(rawValue, 10);
+    return Number.isFinite(parsedValue) ? parsedValue : null;
+  }
+
+  private normalizeMimeType(rawMimeType?: string): string {
+    if (!rawMimeType) {
+      return "";
+    }
+    const [mimeType] = rawMimeType.split(";", 1);
+    return mimeType.trim().toLowerCase();
   }
 
   private isLikelyTextBody(data: Buffer): boolean {

@@ -188,14 +188,23 @@ export function toEventRows(events: CaptureEvent[]): EventRowViewModel[] {
   return events.map((event, index) => {
     const prev = events[index - 1];
     const next = events[index + 1];
-    const durationMs = next ? Math.max(0, next.tRelMs - event.tRelMs) : prev ? Math.max(0, event.tRelMs - prev.tRelMs) : 0;
+    const badge = eventBadge(event);
+    const title = eventTitle(event);
+    const subtitle = eventSubtitle(event);
+    const durationMs = next
+      ? Math.max(0, next.tRelMs - event.tRelMs)
+      : prev
+        ? Math.max(0, event.tRelMs - prev.tRelMs)
+        : 0;
+
     return {
       id: event.id,
       event,
       kind: event.kind,
-      badge: eventBadge(event),
-      title: eventTitle(event),
-      subtitle: eventSubtitle(event),
+      badge,
+      title,
+      subtitle,
+      searchText: `${title} ${subtitle} ${JSON.stringify(event)}`,
       deltaMs: prev ? Math.max(0, event.tRelMs - prev.tRelMs) : 0,
       durationMs,
       relMs: event.tRelMs,
@@ -296,13 +305,44 @@ export function filterEventRows(
       return true;
     }
 
-    const haystack = `${row.title} ${row.subtitle} ${JSON.stringify(row.event)}`;
     if (searchRegex) {
-      return searchRegex.test(haystack);
+      return searchRegex.test(row.searchText);
     }
 
-    return includesText(haystack, query, filters.caseSensitive);
+    return includesText(row.searchText, query, filters.caseSensitive);
   });
+}
+
+function lowerBoundByTimestamp(events: CaptureEvent[], targetTsMs: number): number {
+  let low = 0;
+  let high = events.length;
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (events[mid].tsMs < targetTsMs) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
+}
+
+function upperBoundByTimestamp(events: CaptureEvent[], targetTsMs: number): number {
+  let low = 0;
+  let high = events.length;
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (events[mid].tsMs <= targetTsMs) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
 }
 
 export function getWindowByIndex(
@@ -326,9 +366,10 @@ export function getWindowByTime(
   if (!Number.isFinite(centerTsMs)) {
     return [];
   }
-  return events
-    .filter((event) => Math.abs(event.tsMs - centerTsMs) <= radiusMs)
-    .sort(compareCaptureEvents);
+
+  const startIndex = lowerBoundByTimestamp(events, centerTsMs - radiusMs);
+  const endIndex = upperBoundByTimestamp(events, centerTsMs + radiusMs);
+  return events.slice(startIndex, endIndex);
 }
 
 export function getErrorsAroundEvent(events: CaptureEvent[], centerTsMs: number): CaptureEvent[] {

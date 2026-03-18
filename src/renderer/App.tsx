@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import { DEFAULT_APP_SETTINGS } from "../shared/settings";
 import type {
   AppSettings,
@@ -24,7 +32,6 @@ import {
   getErrorsAroundEvent,
   getNetworkAroundEvent,
   getWindowByIndex,
-  sortTimeline,
   toEventRows,
   type ActionFilterKind,
   type ActionHttpMethodFilter,
@@ -241,10 +248,16 @@ export function App(): JSX.Element {
   const fullScreenshotUsageRef = useRef<Map<string, number>>(new Map());
   const usageTickRef = useRef(0);
   const dismissedStatusErrorRef = useRef<string | null>(null);
+  const timelineCursorRef = useRef(0);
+  const timelineSessionKeyRef = useRef<string | null>(null);
   const longCaptureWarningStateRef = useRef<{ key: string | null; lastReminderSlot: number }>({
     key: null,
     lastReminderSlot: 0
   });
+
+  const deferredSearch = useDeferredValue(search);
+  const deferredUrlFilter = useDeferredValue(urlFilter);
+  const deferredRequestIdFilter = useDeferredValue(requestIdFilter);
 
   const refresh = useCallback(async () => {
     const currentStatus = await window.tracer.session.getStatus();
@@ -258,12 +271,48 @@ export function App(): JSX.Element {
     } else if (dismissedStatusErrorRef.current) {
       dismissedStatusErrorRef.current = null;
     }
+
     if (!currentStatus.sessionId) {
-      setTimeline([]);
+      timelineCursorRef.current = 0;
+      timelineSessionKeyRef.current = null;
+      startTransition(() => {
+        setTimeline([]);
+      });
       return;
     }
-    const events = await window.tracer.session.getTimeline(currentStatus.sessionId);
-    setTimeline(events);
+
+    const timelineSessionKey = `${currentStatus.source ?? "unknown"}:${currentStatus.sessionId}`;
+    const timelineNeedsReset =
+      timelineSessionKeyRef.current !== timelineSessionKey ||
+      currentStatus.counts.events < timelineCursorRef.current;
+
+    if (timelineNeedsReset) {
+      const delta = await window.tracer.session.getTimelineDelta(currentStatus.sessionId, 0);
+      timelineSessionKeyRef.current = timelineSessionKey;
+      timelineCursorRef.current = delta.nextCursor;
+      startTransition(() => {
+        setTimeline(delta.events);
+      });
+      return;
+    }
+
+    if (currentStatus.counts.events === timelineCursorRef.current) {
+      return;
+    }
+
+    const delta = await window.tracer.session.getTimelineDelta(
+      currentStatus.sessionId,
+      timelineCursorRef.current
+    );
+    timelineSessionKeyRef.current = timelineSessionKey;
+    timelineCursorRef.current = delta.nextCursor;
+    if (!delta.reset && delta.events.length === 0) {
+      return;
+    }
+
+    startTransition(() => {
+      setTimeline((previous) => (delta.reset ? delta.events : previous.concat(delta.events)));
+    });
   }, []);
 
   const loadSettings = useCallback(async () => {
@@ -376,7 +425,7 @@ export function App(): JSX.Element {
     }
   }, []);
 
-  const sortedTimeline = useMemo(() => sortTimeline(timeline), [timeline]);
+  const sortedTimeline = timeline;
   const logsTimeline = useMemo(() => {
     if (!selectedTimeRange) {
       return sortedTimeline;
@@ -672,12 +721,12 @@ export function App(): JSX.Element {
   const eventRows = useMemo(() => toEventRows(logsTimeline), [logsTimeline]);
   const actionRowFilters = useMemo<ActionRowFilters>(
     () => ({
-      search,
+      search: deferredSearch,
       selectedKinds,
       caseSensitive: searchCaseSensitive,
       regexSearch: regexSearchEnabled,
-      urlContains: urlFilter,
-      requestIdContains: requestIdFilter,
+      urlContains: deferredUrlFilter,
+      requestIdContains: deferredRequestIdFilter,
       method: methodFilter,
       statusMin: parseNullableInteger(statusMinFilter),
       statusMax: parseNullableInteger(statusMaxFilter),
@@ -689,19 +738,19 @@ export function App(): JSX.Element {
     }),
     [
       consoleLevelFilters,
+      deferredRequestIdFilter,
+      deferredSearch,
+      deferredUrlFilter,
       hideStaticAssets,
       methodFilter,
       onlyErrorsFilter,
       regexSearchEnabled,
-      requestIdFilter,
-      search,
       searchCaseSensitive,
       selectedKinds,
       statusMaxFilter,
       statusMinFilter,
       timeEndSecFilter,
-      timeStartSecFilter,
-      urlFilter
+      timeStartSecFilter
     ]
   );
   const filteredRows = useMemo(
@@ -1139,181 +1188,181 @@ export function App(): JSX.Element {
       )}
       {isMac && <div className="macos-drag-strip" aria-hidden />}
       <div className="trace-content">
-      <TraceToolbar
-        status={status}
-        busy={busy}
-        pauseResumeSupported={pauseResumeSupported}
-        rangeSelectionEnabled={rangeSelectionEnabled}
-        hasTimeRangeSelection={selectedTimeRange !== null}
-        onLaunch={() => void runAction(() => window.tracer.session.launchBrowser())}
-        onLaunchAndCapture={() =>
-          void runAction(async () => {
-            await window.tracer.session.launchBrowser();
-            return window.tracer.session.startCapture();
-          })
-        }
-        onCapture={() => void runAction(() => window.tracer.session.startCapture())}
-        onPause={() =>
-          void runAction(() => {
-            const pauseCapture = window.tracer.session.pauseCapture;
-            if (typeof pauseCapture !== "function") {
-              throw new Error("Pause/Resume is unavailable in this window. Restart the updated app.");
-            }
-            return pauseCapture();
-          })
-        }
-        onResume={() =>
-          void runAction(() => {
-            const resumeCapture = window.tracer.session.resumeCapture;
-            if (typeof resumeCapture !== "function") {
-              throw new Error("Pause/Resume is unavailable in this window. Restart the updated app.");
-            }
-            return resumeCapture();
-          })
-        }
-        onStop={() => void runAction(() => window.tracer.session.stopCapture())}
-        onSave={() => void runAction(() => window.tracer.session.save())}
-        onSaveRange={() =>
-          void runAction(() => {
-            if (!selectedTimeRange) {
-              throw new Error("No range selected.");
-            }
-            return window.tracer.session.save(undefined, { range: selectedTimeRange });
-          })
-        }
-        onOpen={() => void runAction(() => window.tracer.session.open())}
-        onSettings={() => void openSettings()}
-        onToggleRangeSelection={handleToggleRangeSelection}
-        onClearRangeSelection={handleClearRangeSelection}
-      />
+        {(errorMessage || settingsNotice) && (
+          <div className="app-banner-stack">
+            {errorMessage && (
+              <div className="error-banner app-banner">
+                <span>{errorMessage}</span>
+                <button
+                  type="button"
+                  className="banner-close"
+                  onClick={dismissErrorBanner}
+                  aria-label="Close message"
+                >
+                  &times;
+                </button>
+              </div>
+            )}
+            {settingsNotice && (
+              <div className="info-banner app-banner">
+                <span>{settingsNotice}</span>
+                <button
+                  type="button"
+                  className="banner-close"
+                  onClick={() => setSettingsNotice(null)}
+                  aria-label="Close message"
+                >
+                  &times;
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
-      {(errorMessage || settingsNotice) && (
-        <div className="app-banner-stack">
-          {errorMessage && (
-            <div className="error-banner app-banner">
-              <span>{errorMessage}</span>
-              <button
-                type="button"
-                className="banner-close"
-                onClick={dismissErrorBanner}
-                aria-label="Close message"
-              >
-                &times;
-              </button>
-            </div>
-          )}
-          {settingsNotice && (
-            <div className="info-banner app-banner">
-              <span>{settingsNotice}</span>
-              <button
-                type="button"
-                className="banner-close"
-                onClick={() => setSettingsNotice(null)}
-                aria-label="Close message"
-              >
-                &times;
-              </button>
-            </div>
-          )}
-        </div>
-      )}
+        <TraceToolbar
+            status={status}
+            busy={busy}
+            pauseResumeSupported={pauseResumeSupported}
+            rangeSelectionEnabled={rangeSelectionEnabled}
+            hasTimeRangeSelection={selectedTimeRange !== null}
+            onLaunch={() => void runAction(() => window.tracer.session.launchBrowser())}
+            onLaunchAndCapture={() =>
+              void runAction(async () => {
+                await window.tracer.session.launchBrowser();
+                return window.tracer.session.startCapture();
+              })
+            }
+            onCapture={() => void runAction(() => window.tracer.session.startCapture())}
+            onPause={() =>
+              void runAction(() => {
+                const pauseCapture = window.tracer.session.pauseCapture;
+                if (typeof pauseCapture !== "function") {
+                  throw new Error("Pause/Resume is unavailable in this window. Restart the updated app.");
+                }
+                return pauseCapture();
+              })
+            }
+            onResume={() =>
+              void runAction(() => {
+                const resumeCapture = window.tracer.session.resumeCapture;
+                if (typeof resumeCapture !== "function") {
+                  throw new Error("Pause/Resume is unavailable in this window. Restart the updated app.");
+                }
+                return resumeCapture();
+              })
+            }
+            onStop={() => void runAction(() => window.tracer.session.stopCapture())}
+            onSave={() => void runAction(() => window.tracer.session.save())}
+            onSaveRange={() =>
+              void runAction(() => {
+                if (!selectedTimeRange) {
+                  throw new Error("No range selected.");
+                }
+                return window.tracer.session.save(undefined, { range: selectedTimeRange });
+              })
+            }
+            onOpen={() => void runAction(() => window.tracer.session.open())}
+            onSettings={() => void openSettings()}
+            onToggleRangeSelection={handleToggleRangeSelection}
+            onClearRangeSelection={handleClearRangeSelection}
+        />
 
-      <FilmstripTimeline
-        frames={filmstripFrames}
-        selectedEventId={selectedFilmstripEventId}
-        totalDurationMs={totalDurationMs}
-        maxFrameDurationMs={Math.max(800, (settings?.screenshotIntervalMs ?? 1000) * 2)}
-        hoveredWindow={hoveredActionWindow}
-        liveHoverSyncEnabled={actionsLiveHoverTimelineEnabled}
-        combinedLiveAutoScrollEnabled={combinedLiveAutoScrollEnabled}
-        rangeSelectionEnabled={rangeSelectionEnabled}
-        selectedRange={selectedTimeRange}
-        onSelectEvent={handleSelectFilmstripEvent}
-        onRangeChange={handleRangeChange}
-        onVisibleScreenshotIdsChange={handleVisibleScreenshotIdsChange}
-      />
+        <FilmstripTimeline
+            frames={filmstripFrames}
+            selectedEventId={selectedFilmstripEventId}
+            totalDurationMs={totalDurationMs}
+            maxFrameDurationMs={Math.max(800, (settings?.screenshotIntervalMs ?? 1000) * 2)}
+            hoveredWindow={hoveredActionWindow}
+            liveHoverSyncEnabled={actionsLiveHoverTimelineEnabled}
+            combinedLiveAutoScrollEnabled={combinedLiveAutoScrollEnabled}
+            rangeSelectionEnabled={rangeSelectionEnabled}
+            selectedRange={selectedTimeRange}
+            onSelectEvent={handleSelectFilmstripEvent}
+            onRangeChange={handleRangeChange}
+            onVisibleScreenshotIdsChange={handleVisibleScreenshotIdsChange}
+        />
 
-      <ResizableSplit
-        orientation="horizontal"
-        className="workspace-split"
-        initialRatio={0.64}
-        minPrimarySize={260}
-        minSecondarySize={180}
-        storageKey="split-workspace"
-        primary={
-          <ResizableSplit
-            orientation="vertical"
-            className="trace-main-split"
-            initialRatio={0.24}
-            minPrimarySize={220}
-            minSecondarySize={420}
-            storageKey="split-main"
+        <ResizableSplit
+            orientation="horizontal"
+            className="workspace-split"
+            initialRatio={0.64}
+            minPrimarySize={260}
+            minSecondarySize={180}
+            storageKey="split-workspace"
             primary={
-              <ActionsPanel
-                rows={filteredRows}
-                selectedEventId={selectedEventId}
-                search={search}
-                selectedKinds={selectedKinds}
-                searchCaseSensitive={searchCaseSensitive}
-                regexSearchEnabled={regexSearchEnabled}
-                urlFilter={urlFilter}
-                requestIdFilter={requestIdFilter}
-                methodFilter={methodFilter}
-                statusMinFilter={statusMinFilter}
-                statusMaxFilter={statusMaxFilter}
-                timeStartSecFilter={timeStartSecFilter}
-                timeEndSecFilter={timeEndSecFilter}
-                hideStaticAssets={hideStaticAssets}
-                onlyErrorsFilter={onlyErrorsFilter}
-                consoleLevelFilters={consoleLevelFilters}
-                liveHoverSyncEnabled={actionsLiveHoverSyncEnabled}
-                autoFollowLogs={actionsLiveLogsFollowEnabled}
-                onSearchChange={setSearch}
-                onToggleKindFilter={handleToggleKindFilter}
-                onSetKindFilters={handleSetKindFilters}
-                onSearchCaseSensitiveChange={setSearchCaseSensitive}
-                onRegexSearchChange={setRegexSearchEnabled}
-                onUrlFilterChange={setUrlFilter}
-                onRequestIdFilterChange={setRequestIdFilter}
-                onMethodFilterChange={setMethodFilter}
-                onStatusMinFilterChange={setStatusMinFilter}
-                onStatusMaxFilterChange={setStatusMaxFilter}
-                onTimeStartSecFilterChange={setTimeStartSecFilter}
-                onTimeEndSecFilterChange={setTimeEndSecFilter}
-                onHideStaticAssetsChange={setHideStaticAssets}
-                onOnlyErrorsFilterChange={setOnlyErrorsFilter}
-                onToggleConsoleLevelFilter={handleToggleConsoleLevelFilter}
-                onSetConsoleLevelFilters={handleSetConsoleLevelFilters}
-                onClearAdvancedFilters={handleClearAdvancedActionFilters}
-                onToggleLiveHoverSync={setActionsLiveHoverSyncEnabled}
-                onSelectEvent={handleSelectEvent}
-                onHoverWindow={handleActionsHoverWindow}
+              <ResizableSplit
+                orientation="vertical"
+                className="trace-main-split"
+                initialRatio={0.24}
+                minPrimarySize={220}
+                minSecondarySize={420}
+                storageKey="split-main"
+                primary={
+                  <ActionsPanel
+                    rows={filteredRows}
+                    selectedEventId={selectedEventId}
+                    search={search}
+                    selectedKinds={selectedKinds}
+                    searchCaseSensitive={searchCaseSensitive}
+                    regexSearchEnabled={regexSearchEnabled}
+                    urlFilter={urlFilter}
+                    requestIdFilter={requestIdFilter}
+                    methodFilter={methodFilter}
+                    statusMinFilter={statusMinFilter}
+                    statusMaxFilter={statusMaxFilter}
+                    timeStartSecFilter={timeStartSecFilter}
+                    timeEndSecFilter={timeEndSecFilter}
+                    hideStaticAssets={hideStaticAssets}
+                    onlyErrorsFilter={onlyErrorsFilter}
+                    consoleLevelFilters={consoleLevelFilters}
+                    liveHoverSyncEnabled={actionsLiveHoverSyncEnabled}
+                    autoFollowLogs={actionsLiveLogsFollowEnabled}
+                    onSearchChange={setSearch}
+                    onToggleKindFilter={handleToggleKindFilter}
+                    onSetKindFilters={handleSetKindFilters}
+                    onSearchCaseSensitiveChange={setSearchCaseSensitive}
+                    onRegexSearchChange={setRegexSearchEnabled}
+                    onUrlFilterChange={setUrlFilter}
+                    onRequestIdFilterChange={setRequestIdFilter}
+                    onMethodFilterChange={setMethodFilter}
+                    onStatusMinFilterChange={setStatusMinFilter}
+                    onStatusMaxFilterChange={setStatusMaxFilter}
+                    onTimeStartSecFilterChange={setTimeStartSecFilter}
+                    onTimeEndSecFilterChange={setTimeEndSecFilter}
+                    onHideStaticAssetsChange={setHideStaticAssets}
+                    onOnlyErrorsFilterChange={setOnlyErrorsFilter}
+                    onToggleConsoleLevelFilter={handleToggleConsoleLevelFilter}
+                    onSetConsoleLevelFilters={handleSetConsoleLevelFilters}
+                    onClearAdvancedFilters={handleClearAdvancedActionFilters}
+                    onToggleLiveHoverSync={setActionsLiveHoverSyncEnabled}
+                    onSelectEvent={handleSelectEvent}
+                    onHoverWindow={handleActionsHoverWindow}
+                  />
+                }
+                secondary={
+                  <PreviewPanel
+                    selectedEvent={selectedEvent}
+                    currentFrame={currentFrame}
+                    currentFramePayload={currentFramePayload}
+                    liveScreenshotSyncEnabled={liveScreenshotSyncEnabled}
+                    onToggleLiveScreenshotSync={handleToggleLiveScreenshotSync}
+                    toggleDisabled={busy}
+                  />
+                }
               />
             }
             secondary={
-              <PreviewPanel
+              <InspectorTabs
                 selectedEvent={selectedEvent}
-                currentFrame={currentFrame}
-                currentFramePayload={currentFramePayload}
-                liveScreenshotSyncEnabled={liveScreenshotSyncEnabled}
-                onToggleLiveScreenshotSync={handleToggleLiveScreenshotSync}
-                toggleDisabled={busy}
+                logWindow={logTabEvents}
+                errorWindow={errorTabEvents}
+                consoleWindow={consoleTabEvents}
+                networkWindow={networkTabEvents}
+                liveSyncEnabled={inspectorLiveSyncEnabled}
+                onToggleLiveSync={setInspectorLiveSyncEnabled}
               />
             }
-          />
-        }
-        secondary={
-          <InspectorTabs
-            selectedEvent={selectedEvent}
-            logWindow={logTabEvents}
-            errorWindow={errorTabEvents}
-            consoleWindow={consoleTabEvents}
-            networkWindow={networkTabEvents}
-            liveSyncEnabled={inspectorLiveSyncEnabled}
-            onToggleLiveSync={setInspectorLiveSyncEnabled}
-          />
-        }
-      />
+        />
       </div>
 
       <SettingsModal

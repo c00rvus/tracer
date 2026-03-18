@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createSessionArchive, extractSessionArchive } from "./archive";
-import { ensureDir } from "./utils";
+import { ensureDir, parseEventsNdjson } from "./utils";
 
 describe("archive", () => {
   it("creates and extracts a session archive with expected files", async () => {
@@ -39,5 +39,11 @@ describe("archive", () => {
       await rm(output, { recursive: true, force: true });
       await rm(extract, { recursive: true, force: true });
     }
+  });
+
+  it("parses ndjson with utf8 bom", () => {
+    const events = parseEventsNdjson('\uFEFF{"id":"1"}\n{"id":"2"}\n');
+
+    expect(events).toHaveLength(2);
   });
 });
