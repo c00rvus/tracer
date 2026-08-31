@@ -2,6 +2,8 @@
 
 Windows desktop app (Electron + Playwright) to capture Chromium sessions with a DevTools-like timeline.
 
+![Tracer Desktop showing a captured Chromium session with timeline, event list, preview, and console details](assets/tracer-desktop.png)
+
 ## MVP status
 
 - Embedded Chromium via Playwright.
